@@ -1548,34 +1548,244 @@ html, body {
   font-size: 13.5px;
 }
 
-/* Responsive Breakpoints */
+/* Mobile Navigation Top App Bar & Bottom Bar (Hidden on Desktop) */
+.mobile-app-bar {
+  display: none;
+}
+
+.mobile-bottom-nav {
+  display: none;
+}
+
+.mobile-sidebar-backdrop {
+  display: none;
+}
+
+/* ==============================================================================
+   RESPONSIVE & MOBILE PWA STYLES (<= 900px)
+   ============================================================================== */
+
 @media (max-width: 900px) {
-  .mailbox-sidebar {
-    width: 220px;
-    min-width: 220px;
+  .mailbox-workspace {
+    position: relative;
+    width: 100%;
+    height: 100dvh;
   }
+
+  /* 1. Mobile Sidebar as Slide-out Drawer */
+  .mailbox-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 280px;
+    max-width: 85vw;
+    z-index: 120;
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 12px 0 36px rgba(0, 0, 0, 0.7);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .mailbox-sidebar.drawer-open {
+    transform: translateX(0);
+  }
+
+  .mobile-sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    z-index: 110;
+    opacity: 1;
+    transition: opacity 0.25s ease;
+  }
+
+  .mobile-sidebar-backdrop.hidden {
+    display: none;
+    opacity: 0;
+  }
+
+  /* 2. Mobile Native Top App Bar */
+  .mobile-app-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: calc(54px + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: 12px;
+    padding-right: 12px;
+    background: rgba(14, 17, 23, 0.95);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+    z-index: 50;
+  }
+
+  .mobile-bar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: none;
+    color: var(--text-main);
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+
+  .mobile-bar-btn:active {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .mobile-bar-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .mobile-bar-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent-success);
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+  }
+
+  .mobile-bar-status-dot.syncing {
+    background: var(--accent-primary);
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.8);
+    animation: pulse 1s infinite alternate;
+  }
+
+  .mobile-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  /* 3. Center Message Feed List */
   .mailbox-list-pane {
-    width: auto;
+    width: 100%;
     flex: 1;
     min-width: 0;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
   }
+
+  .list-toolbar {
+    padding: 10px 14px 8px 14px;
+  }
+
+  /* 4. Slide-in Fullscreen Email Reader Pane */
   .mailbox-reader-pane {
     position: fixed;
     inset: 0;
+    width: 100vw;
+    height: 100dvh;
     z-index: 100;
+    background: var(--bg-app);
     transform: translateX(100%);
-    transition: transform 0.25s ease-in-out;
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    display: flex;
+    flex-direction: column;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
+
   .mailbox-reader-pane.mobile-open {
     transform: translateX(0);
   }
-  .reader-back-btn {
-    display: inline-flex;
-  }
-}
 
-@media (max-width: 680px) {
-  .mailbox-sidebar {
-    display: none; /* Mobile hamburger could toggle this */
+  .reader-back-btn {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    min-height: 44px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent-primary);
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+
+  .reader-back-btn:active {
+    background: rgba(59, 130, 246, 0.2);
+  }
+
+  /* 5. Mobile Fixed Bottom Navigation Bar */
+  .mobile-bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: calc(58px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: rgba(11, 13, 17, 0.96);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-top: 1px solid var(--border-subtle);
+    z-index: 90;
+    justify-content: space-around;
+    align-items: center;
+  }
+
+  .mobile-nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    height: 100%;
+    min-height: 48px;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: color 0.15s ease, transform 0.1s ease;
+  }
+
+  .mobile-nav-item:active {
+    transform: scale(0.92);
+  }
+
+  .mobile-nav-item.active {
+    color: var(--accent-primary);
+  }
+
+  .mobile-nav-item.active svg {
+    stroke: var(--accent-primary);
+    filter: drop-shadow(0 0 6px rgba(59, 130, 246, 0.5));
+  }
+
+  /* Message Card Touch Sizing */
+  .message-card {
+    padding: 14px 16px;
+    min-height: 64px;
+  }
+
+  .btn-mark-read, .btn-card-star {
+    min-width: 44px;
+    min-height: 44px;
   }
 }

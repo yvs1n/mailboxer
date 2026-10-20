@@ -30,6 +30,142 @@ if (typeof globalThis !== 'undefined' && !globalThis.escapeHtml) {
   globalThis.escapeHtml = escapeHtml;
 }
 
+/**
+ * Utility to decode quoted-printable strings (RFC 2045)
+ */
+function decodeQuotedPrintable(str) {
+  if (!str || typeof str !== 'string') return '';
+  const stripped = str.replace(/=(?:\r\n|\r|\n)/g, '');
+  return stripped.replace(/((?:=[A-Fa-f0-9]{2})+)/g, function(match) {
+    try {
+      return decodeURIComponent(match.replace(/=/g, '%'));
+    } catch {
+      return match.replace(/=([A-Fa-f0-9]{2})/g, function(_, hex) {
+        return String.fromCharCode(parseInt(hex, 16));
+      });
+    }
+  });
+}
+
+/**
+ * Strips HTML formatting into clean plain text
+ */
+function htmlToCleanText(html) {
+  if (!html || typeof html !== 'string') return '';
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<\/p>|<\/div>|<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n\s*\n\s*\n+/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Extracts and cleans readable plain-text from raw MIME multipart bodies
+ */
+function cleanMimeBody(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let text = raw.trim();
+
+  // 1. Detect multipart MIME boundary
+  const boundaryMatch = text.match(/^--([a-zA-Z0-9_\-./=]+)/m);
+  if (boundaryMatch) {
+    const boundary = boundaryMatch[1];
+    const boundaryEscaped = boundary.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\if (typeof globalThis !== 'undefined' && !globalThis.escapeHtml) {
+  globalThis.escapeHtml = escapeHtml;
+}');
+    const parts = text.split(new RegExp('--' + boundaryEscaped + '(?:--)?'));
+
+    let chosenPart = '';
+    let isHtml = false;
+    for (const part of parts) {
+      const p = part.trim();
+      if (!p) continue;
+      if (/Content-Type:\s*text\/plain/i.test(p)) {
+        chosenPart = p;
+        isHtml = false;
+        break;
+      }
+    }
+    if (!chosenPart) {
+      for (const part of parts) {
+        const p = part.trim();
+        if (!p) continue;
+        if (/Content-Type:\s*text\/html/i.test(p)) {
+          chosenPart = p;
+          isHtml = true;
+          break;
+        }
+      }
+    }
+    if (!chosenPart) {
+      for (const part of parts) {
+        const p = part.trim();
+        if (p) {
+          chosenPart = p;
+          isHtml = /<[a-z][\s\S]*>/i.test(p);
+          break;
+        }
+      }
+    }
+
+    if (chosenPart) {
+      const headerEnd = chosenPart.search(/\r?\n\r?\n/);
+      let headers = '';
+      let body = chosenPart;
+      if (headerEnd !== -1) {
+        headers = chosenPart.slice(0, headerEnd);
+        body = chosenPart.slice(headerEnd).trim();
+      }
+
+      if (/Content-Transfer-Encoding:\s*base64/i.test(headers)) {
+        try {
+          if (typeof atob === 'function') {
+            body = decodeURIComponent(escape(atob(body.replace(/\s+/g, ''))));
+          }
+        } catch {
+          try {
+            if (typeof atob === 'function') body = atob(body.replace(/\s+/g, ''));
+          } catch {}
+        }
+      } else if (/Content-Transfer-Encoding:\s*quoted-printable/i.test(headers) || /=([0-9A-F]{2})/i.test(body)) {
+        body = decodeQuotedPrintable(body);
+      }
+      if (isHtml || /<[a-z][\s\S]*>/i.test(body)) {
+        body = htmlToCleanText(body);
+      }
+      text = body;
+    }
+  } else {
+    if (/=([0-9A-F]{2})/i.test(text) || /=\r?\n/.test(text)) {
+      text = decodeQuotedPrintable(text);
+    }
+    if (/<[a-z][\s\S]*>/i.test(text)) {
+      text = htmlToCleanText(text);
+    }
+  }
+
+  // Strip residual MIME headers
+  text = text.replace(/^(?:(?:Content-Type|Content-Transfer-Encoding|Content-Disposition|Mime-Version|Content-Description):[^\n]*(?:\r?\n|\n))+/gi, '').trim();
+
+  return text;
+}
+
+if (typeof window !== 'undefined') {
+  window.cleanMimeBody = cleanMimeBody;
+}
+if (typeof globalThis !== 'undefined' && !globalThis.cleanMimeBody) {
+  globalThis.cleanMimeBody = cleanMimeBody;
+}
+
+
 document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   // STATE MANAGEMENT
@@ -81,6 +217,15 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnLoadMore = document.getElementById('btn-load-more');
   const loadMoreText = document.getElementById('load-more-text');
   const loadMoreSpinner = document.getElementById('load-more-spinner');
+
+  // Mobile App Bar & Drawer Elements
+  const btnMobileMenu = document.getElementById('btn-mobile-menu');
+  const mobileBarTitle = document.getElementById('mobile-bar-title');
+  const mobileBarStatusDot = document.getElementById('mobile-bar-status-dot');
+  const btnMobileSearchToggle = document.getElementById('btn-mobile-search-toggle');
+  const btnMobileSync = document.getElementById('btn-mobile-sync');
+  const mobileSidebarBackdrop = document.getElementById('mobile-sidebar-backdrop');
+  const mobileBottomNav = document.getElementById('mobile-bottom-nav');
 
   // Desktop Reader Pane Elements
   const desktopReaderPane = document.getElementById('desktop-reader-pane');
@@ -489,6 +634,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderMessages(messages) {
     if (!messagesContainer) return;
+    if (Array.isArray(messages)) {
+      messages = messages.filter(m => {
+        if (!m || !m.date) return true;
+        try {
+          return new Date(m.date).getFullYear() >= 2025;
+        } catch {
+          return true;
+        }
+      });
+    }
 
     if (!Array.isArray(messages) || messages.length === 0) {
       messagesContainer.innerHTML = `
@@ -513,7 +668,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const senderDisplay = msg.sender || msg.senderEmail || 'Sender';
       const subjectDisplay = msg.subject || '(No Subject)';
       const dateDisplay = formatRelativeDate(msg.date);
-      const snippetDisplay = msg.bodySnippet || '';
+      const snippetDisplay = cleanMimeBody(msg.bodySnippet || '');
 
       // Account pill if known
       const acc = accountsList.find(a => a.id === msg.accountId);
@@ -645,10 +800,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const acc = accountsList.find(a => a.id === msg.accountId);
     const accLabel = acc ? (acc.email || acc.provider) : 'Inbox';
 
-    // Body formatting
+    // Body formatting with MIME cleaning & linkification
     const rawBody = msg.bodySnippet || msg.body || '(No message body content available)';
-    const formattedBody = escapeHtml(rawBody)
-      .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+    const cleanedBody = cleanMimeBody(rawBody);
+    const formattedBody = escapeHtml(cleanedBody)
+      .replace(/(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
       .replace(/\n/g, '<br>');
 
     // 1. Populate Desktop Reader Pane

@@ -68,6 +68,14 @@ export class WebServer {
     if (this.store && !this.accountManager.store) {
       this.accountManager.store = this.store;
     }
+
+    // Auto-clean pre-2025 legacy backlog to ensure fresh mailbox
+    try {
+      if (this.store && typeof this.store.purgeOlderThan === 'function') {
+        const minCutoff = process.env.MAILBOXER_MIN_DATE || '2025-01-01T00:00:00.000Z';
+        this.store.purgeOlderThan(minCutoff);
+      }
+    } catch {}
     this.classifier = options.classifier || new Classifier({ store: this.store });
     this.notificationManager = options.notificationManager || new NotificationManager({ store: this.store });
     this.syncEngine = options.syncEngine || new SyncEngine({

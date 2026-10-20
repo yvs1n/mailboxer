@@ -398,6 +398,134 @@ export function parseSearchResponse(lines) {
 }
 
 /**
+ * Decodes quoted-printable encoded strings according to RFC 2045.
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+export function decodeQuotedPrintable(str) {
+  if (!str || typeof str !== 'string') return '';
+  const stripped = str.replace(/=(?:\r\n|\r|\n)/g, '');
+  return stripped.replace(/((?:=[A-Fa-f0-9]{2})+)/g, (match) => {
+    try {
+      return decodeURIComponent(match.replace(/=/g, '%'));
+    } catch {
+      return match.replace(/=([A-Fa-f0-9]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    }
+  });
+}
+
+/**
+ * Converts simple HTML email fragments to clean plain text.
+ *
+ * @param {string} html
+ * @returns {string}
+ */
+export function htmlToCleanText(html) {
+  if (!html || typeof html !== 'string') return '';
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<\/p>|<\/div>|<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Extracts and cleans readable plain-text from raw MIME multipart bodies and quoted-printable text.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+export function cleanMimeBody(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let text = raw.trim();
+
+  // 1. Detect multipart MIME boundary
+  const boundaryMatch = text.match(/^--([a-zA-Z0-9_\-./=]+)/m);
+  if (boundaryMatch) {
+    const boundary = boundaryMatch[1];
+    const parts = text.split(new RegExp('--' + boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:--)?'));
+
+    let chosenPart = '';
+    let isHtml = false;
+    for (const part of parts) {
+      const p = part.trim();
+      if (!p) continue;
+      if (/Content-Type:\s*text\/plain/i.test(p)) {
+        chosenPart = p;
+        isHtml = false;
+        break;
+      }
+    }
+    if (!chosenPart) {
+      for (const part of parts) {
+        const p = part.trim();
+        if (!p) continue;
+        if (/Content-Type:\s*text\/html/i.test(p)) {
+          chosenPart = p;
+          isHtml = true;
+          break;
+        }
+      }
+    }
+    if (!chosenPart) {
+      for (const part of parts) {
+        const p = part.trim();
+        if (p) {
+          chosenPart = p;
+          isHtml = /<[a-z][\s\S]*>/i.test(p);
+          break;
+        }
+      }
+    }
+
+    if (chosenPart) {
+      const headerEnd = chosenPart.search(/\r?\n\r?\n/);
+      let headers = '';
+      let body = chosenPart;
+      if (headerEnd !== -1) {
+        headers = chosenPart.slice(0, headerEnd);
+        body = chosenPart.slice(headerEnd).trim();
+      }
+
+      if (/Content-Transfer-Encoding:\s*base64/i.test(headers)) {
+        try {
+          if (typeof Buffer !== 'undefined') {
+            body = Buffer.from(body.replace(/\s+/g, ''), 'base64').toString('utf-8');
+          }
+        } catch {}
+      } else if (/Content-Transfer-Encoding:\s*quoted-printable/i.test(headers) || /=([0-9A-F]{2})/i.test(body)) {
+        body = decodeQuotedPrintable(body);
+      }
+      if (isHtml || /<[a-z][\s\S]*>/i.test(body)) {
+        body = htmlToCleanText(body);
+      }
+      text = body;
+    }
+  } else {
+    if (/=([0-9A-F]{2})/i.test(text) || /=\r?\n/.test(text)) {
+      text = decodeQuotedPrintable(text);
+    }
+    if (/<[a-z][\s\S]*>/i.test(text)) {
+      text = htmlToCleanText(text);
+    }
+  }
+
+  // Strip residual MIME headers
+  text = text.replace(/^(?:(?:Content-Type|Content-Transfer-Encoding|Content-Disposition|Mime-Version|Content-Description):[^\n]*(?:\r?\n|\n))+/gi, '').trim();
+
+  return text;
+}
+
+/**
  * Parses untagged FETCH responses containing message headers and body previews.
  *
  * @param {string[]} lines - Untagged lines from UID FETCH
@@ -503,8 +631,9 @@ export function parseFetchResponses(lines) {
     if (headers.to) recipients.push(...extractEmailsList(headers.to));
     if (headers.cc) recipients.push(...extractEmailsList(headers.cc));
 
-    const cleanBodySnippet = bodySnippet
-      ? bodySnippet.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1000)
+    const cleaned = cleanMimeBody(bodySnippet);
+    const cleanBodySnippet = cleaned
+      ? cleaned.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1000)
       : '';
 
     results.push({

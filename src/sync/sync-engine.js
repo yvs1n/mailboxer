@@ -189,14 +189,23 @@ export class SyncEngine extends EventEmitter {
         syncStatus: 'SYNCING'
       });
 
-      // 3. Delta UID Fetch
+      // 3. Delta UID Fetch (Restricted to 2025 onwards for fresh inbox)
+      const sinceCriteria = options.since || process.env.MAILBOXER_SYNC_SINCE || 'SINCE 1-Jan-2025';
+      const minDateStr = options.minDate || process.env.MAILBOXER_MIN_DATE || '2025-01-01T00:00:00.000Z';
+      const minTimestamp = new Date(minDateStr).getTime();
+
       const maxLocalUid = this.store.getMaxUid(folderId);
       let uidsToFetch = [];
 
       if (maxLocalUid === null || maxLocalUid === 0) {
-        // Initial sync: fetch all UIDs (or sliced if caller explicitly passes initialLimit)
-        const allUids = await client.searchUids('ALL');
-        uidsToFetch = options.initialLimit ? allUids.slice(-options.initialLimit) : allUids;
+        // Initial sync: fetch fresh UIDs from 2025 onwards
+        let freshUids = [];
+        try {
+          freshUids = await client.searchUids(sinceCriteria);
+        } catch {
+          freshUids = await client.searchUids('ALL');
+        }
+        uidsToFetch = options.initialLimit ? freshUids.slice(-options.initialLimit) : freshUids;
       } else {
         // Incremental sync & Historical Backfill:
         const rangeCriteria = `UID ${maxLocalUid + 1}:*`;
@@ -204,10 +213,15 @@ export class SyncEngine extends EventEmitter {
         // Exclude any UID <= maxLocalUid (RFC 3501 quirk fallback)
         const newUids = candidateUids.filter(u => u > maxLocalUid);
 
-        // Also backfill any missing historical messages if local store has gaps
+        // Also backfill any missing historical messages from 2025 onwards
         let missingUids = [];
         if (this.store.getFolderUids) {
-          const allRemoteUids = await client.searchUids('ALL');
+          let allRemoteUids = [];
+          try {
+            allRemoteUids = await client.searchUids(sinceCriteria);
+          } catch {
+            allRemoteUids = await client.searchUids('ALL');
+          }
           const localUids = new Set(this.store.getFolderUids(folderId));
           missingUids = allRemoteUids.filter(u => !localUids.has(u) && !newUids.includes(u));
         }
@@ -223,7 +237,14 @@ export class SyncEngine extends EventEmitter {
           const range = chunk.join(',');
           const fetchedMessages = await client.fetchMessages(range);
 
-          const records = fetchedMessages.map(m => {
+          // Strictly filter out messages older than 2025
+          const freshMessages = fetchedMessages.filter(m => {
+            if (!m.date) return true;
+            const t = new Date(m.date).getTime();
+            return isNaN(t) || t >= minTimestamp;
+          });
+
+          const records = freshMessages.map(m => {
             let triage = { category: 'NORMAL', score: 50, isNoise: false, reason: null };
             if (this.classifier?.classify) {
               triage = this.classifier.classify(m);

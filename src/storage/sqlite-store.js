@@ -1101,6 +1101,24 @@ export class SqliteStore {
     }
   }
 
+    /**
+   * Purges messages with a date older than the given cutoff ISO date string.
+   * Cleans historical backlog older than e.g. 2025-01-01 to keep mailbox fresh.
+   *
+   * @param {string} isoDate - ISO cutoff string e.g. '2025-01-01T00:00:00.000Z'
+   * @returns {number} Number of purged messages
+   */
+  purgeOlderThan(isoDate) {
+    if (!isoDate) return 0;
+    try {
+      const stmt = this.db.prepare('DELETE FROM messages WHERE date < ?');
+      const info = stmt.run(isoDate);
+      return info?.changes || 0;
+    } catch {
+      return 0;
+    }
+  }
+
   // ==========================================
   // TRIAGE RULES CRUD
   // ==========================================

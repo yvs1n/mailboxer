@@ -1,18 +1,71 @@
 /**
- * Mailboxer Web Push Service Worker
+ * Mailboxer PWA & Web Push Service Worker
  *
- * Handles background push notifications, system tray icon badging,
- * quick action buttons, and window focus / deep-link navigation.
+ * Provides offline shell caching, background push notifications,
+ * system tray icon badging, and deep-link navigation.
  */
 
+const CACHE_NAME = 'mailboxer-shell-v1';
+const STATIC_ASSETS = [
+  '/',
+  '/index.html',
+  '/style.css',
+  '/app.js',
+  '/manifest.json',
+  '/icon.svg'
+];
+
 self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(STATIC_ASSETS).catch(() => {});
+    })
+  );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches.keys().then((keys) => {
+      return Promise.all(
+        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+      );
+    }).then(() => self.clients.claim())
+  );
 });
 
+// Stale-while-revalidate for static shell assets, network-only for /api/
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+
+  // Skip caching for non-GET or API endpoints
+  if (event.request.method !== 'GET' || url.pathname.startsWith('/api/') || url.pathname.startsWith('/health')) {
+    return;
+  }
+
+  event.respondWith(
+    fetch(event.request)
+      .then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200) {
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseToCache);
+          });
+        }
+        return networkResponse;
+      })
+      .catch(() => {
+        return caches.match(event.request).then((cachedResponse) => {
+          if (cachedResponse) return cachedResponse;
+          if (event.request.mode === 'navigate') {
+            return caches.match('/index.html') || caches.match('/');
+          }
+        });
+      })
+  );
+});
+
+// Background Web Push Notifications
 self.addEventListener('push', (event) => {
   let payload = {};
   if (event.data) {
@@ -26,8 +79,8 @@ self.addEventListener('push', (event) => {
   const title = payload.title || '⭐ Mailboxer VIP Alert';
   const options = {
     body: payload.body || 'New high-priority email received.',
-    icon: payload.icon || '/favicon.ico',
-    badge: payload.badge || '/favicon.ico',
+    icon: payload.icon || '/icon.svg',
+    badge: payload.badge || '/icon.svg',
     tag: payload.tag || `mailboxer-msg-${payload.data?.messageId || Date.now()}`,
     renotify: true,
     data: payload.data || { url: '/' },
