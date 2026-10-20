@@ -327,17 +327,26 @@ export class TlsSocketTransport extends SocketTransport {
     const tlsConfig = options.tls || {};
     const customServername = options.servername ?? tlsConfig.servername ?? this._defaultOptions.servername;
     const servername = resolveServername(options.host, customServername);
-    return {
+    const tlsOpts = {
       host: options.host,
       port: options.port ?? tlsConfig.port ?? this._defaultOptions.port,
       servername,
       minVersion: options.minVersion ?? tlsConfig.minVersion ?? this._defaultOptions.minVersion,
       maxVersion: options.maxVersion ?? tlsConfig.maxVersion ?? this._defaultOptions.maxVersion,
       rejectUnauthorized: options.rejectUnauthorized ?? tlsConfig.rejectUnauthorized ?? this._defaultOptions.rejectUnauthorized,
-      ca: options.ca ?? tlsConfig.ca ?? this._defaultOptions.ca,
-      socket: options.socket ?? tlsConfig.socket,
-      checkServerIdentity: options.checkServerIdentity ?? tlsConfig.checkServerIdentity
+      ca: options.ca ?? tlsConfig.ca ?? this._defaultOptions.ca
     };
+
+    if (options.socket || tlsConfig.socket) {
+      tlsOpts.socket = options.socket ?? tlsConfig.socket;
+    }
+
+    const checkServerIdentity = options.checkServerIdentity ?? tlsConfig.checkServerIdentity ?? this._defaultOptions.checkServerIdentity;
+    if (typeof checkServerIdentity === 'function') {
+      tlsOpts.checkServerIdentity = checkServerIdentity;
+    }
+
+    return tlsOpts;
   }
 
   async connect(options = {}) {
