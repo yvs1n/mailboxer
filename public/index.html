@@ -530,6 +530,44 @@
         </form>
       </div>
     </div>
+
+    <!-- Modal: Email Reader & Full Inspection -->
+    <div id="modal-email-reader" class="modal-backdrop hidden">
+      <div class="modal-card reader-card">
+        <div class="modal-header reader-header">
+          <div class="reader-header-meta">
+            <span id="reader-category-badge" class="badge-pill badge-vip">⭐ VIP</span>
+            <h3 id="reader-subject" class="reader-subject-title">Email Subject</h3>
+          </div>
+          <button id="btn-close-reader" class="btn-close" title="Close reader (Esc)">&times;</button>
+        </div>
+
+        <div class="reader-details-grid">
+          <div class="reader-detail-row">
+            <span class="reader-label">From:</span>
+            <span id="reader-sender" class="reader-value"></span>
+          </div>
+          <div class="reader-detail-row">
+            <span class="reader-label">To:</span>
+            <span id="reader-recipient" class="reader-value"></span>
+          </div>
+          <div class="reader-detail-row">
+            <span class="reader-label">Date:</span>
+            <span id="reader-timestamp" class="reader-value"></span>
+          </div>
+        </div>
+
+        <div class="reader-actions-bar">
+          <button id="btn-reader-toggle-read" class="btn-ghost btn-toggle-read" type="button">
+            Mark as Unread
+          </button>
+        </div>
+
+        <div class="reader-body-container">
+          <div id="reader-body-content" class="reader-body-text"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/app.js"></script>

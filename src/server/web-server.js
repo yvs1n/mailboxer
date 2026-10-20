@@ -65,9 +65,16 @@ export class WebServer {
       : (process.env.SQLITE_PATH || path.resolve(this.dataDir, 'mailboxer.sqlite')));
 
     this.store = options.store || new SqliteStore(defaultDbPath);
+    if (this.store && !this.accountManager.store) {
+      this.accountManager.store = this.store;
+    }
     this.classifier = options.classifier || new Classifier({ store: this.store });
     this.notificationManager = options.notificationManager || new NotificationManager({ store: this.store });
-    this.syncEngine = options.syncEngine || new SyncEngine({ store: this.store, accountManager: this.accountManager });
+    this.syncEngine = options.syncEngine || new SyncEngine({
+      store: this.store,
+      accountManager: this.accountManager,
+      classifier: this.classifier
+    });
     this.idleManager = options.idleManager || new IdleManager({
       syncEngine: this.syncEngine,
       store: this.store,
@@ -471,6 +478,9 @@ export class WebServer {
 
       try {
         const account = await this.accountManager.handleOAuthCallback(provider, code);
+        if (this.syncEngine && account?.id) {
+          this.syncEngine.syncAccount(account.id, { throwOnError: false }).catch(() => {});
+        }
         if (wantsJson) {
           this._json(res, 200, { success: true, account });
           return;
@@ -664,8 +674,18 @@ export class WebServer {
       const offset = Number(url.searchParams.get('offset')) || 0;
 
       if (q) {
-        const messages = this.store.search(q, { accountId, limit });
-        this._json(res, 200, { messages, count: messages.length, query: q });
+        let messages = this.store.search(q, {
+          accountId,
+          folderId,
+          limit,
+          offset,
+          category: category && category !== 'ALL' ? category : undefined
+        });
+        if (category && category !== 'ALL') {
+          const catUpper = category.toUpperCase();
+          messages = messages.filter(m => (m.category || '').toUpperCase() === catUpper);
+        }
+        this._json(res, 200, { messages, count: messages.length, query: q, category: category || 'ALL' });
         return;
       }
 
@@ -685,7 +705,19 @@ export class WebServer {
       const messageId = decodeURIComponent(readMatch[1]);
       try {
         this.store.db.prepare("UPDATE messages SET is_seen = 1, updated_at = datetime('now') WHERE id = ? OR message_id = ?").run(messageId, messageId);
-        this._json(res, 200, { success: true, messageId });
+        this._json(res, 200, { success: true, messageId, isSeen: true });
+      } catch (err) {
+        this._json(res, 400, { error: err.message });
+      }
+      return;
+    }
+
+    const unreadMatch = pathname.match(/^\/api\/messages\/([^/]+)\/unread$/);
+    if (method === 'POST' && unreadMatch) {
+      const messageId = decodeURIComponent(unreadMatch[1]);
+      try {
+        this.store.db.prepare("UPDATE messages SET is_seen = 0, updated_at = datetime('now') WHERE id = ? OR message_id = ?").run(messageId, messageId);
+        this._json(res, 200, { success: true, messageId, isSeen: false });
       } catch (err) {
         this._json(res, 400, { error: err.message });
       }

@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { ImapClient } from '../connection/imap-client.js';
 import { SqliteStore } from '../storage/sqlite-store.js';
 import { defaultAccountManager } from '../auth/account-manager.js';
+import { defaultClassifier } from '../triage/classifier.js';
 
 /**
  * Synchronization Engine orchestrating background sync and local SQLite persistence.
@@ -25,6 +26,7 @@ export class SyncEngine extends EventEmitter {
    * @param {Function} [options.createClient] - Optional factory for creating ImapClient
    * @param {number} [options.batchSize=50] - Batch size for UID fetch
    * @param {number} [options.syncIntervalMs=60000] - Default periodic sync interval
+   * @param {object} [options.classifier] - Triage classifier instance
    */
   constructor(options = {}) {
     super();
@@ -32,6 +34,7 @@ export class SyncEngine extends EventEmitter {
     this.options = { ...options };
     this.store = options.store || options.db || new SqliteStore(options.dbPath || ':memory:');
     this.accountManager = options.accountManager || defaultAccountManager;
+    this.classifier = options.classifier || defaultClassifier;
     this.createClient = options.createClient || ((config) => new ImapClient({ accountConfig: config, ...options.clientOptions }));
     this.batchSize = options.batchSize || 50;
     this.syncIntervalMs = options.syncIntervalMs || 60000;
@@ -56,11 +59,19 @@ export class SyncEngine extends EventEmitter {
   async _getAuthenticatedClient(accountId, options = {}) {
     let accountConfig = options.accountConfig;
     if (!accountConfig && this.accountManager?.getAccount) {
-      accountConfig = await this.accountManager.getAccount(accountId);
+      try {
+        accountConfig = await this.accountManager.getAccount(accountId);
+      } catch {
+        // Fall back to subsequent resolution strategies
+      }
     }
     if (!accountConfig && this.accountManager?.getAccounts) {
-      const all = await this.accountManager.getAccounts();
-      accountConfig = all.find(a => a.id === accountId);
+      try {
+        const all = await this.accountManager.getAccounts();
+        accountConfig = all.find(a => a.id === accountId);
+      } catch {
+        // Fall back to subsequent resolution strategies
+      }
     }
     if (!accountConfig) {
       // Fallback: check SQLite accounts table
@@ -173,16 +184,25 @@ export class SyncEngine extends EventEmitter {
       let uidsToFetch = [];
 
       if (maxLocalUid === null || maxLocalUid === 0) {
-        // Initial sync: fetch all UIDs (or sliced up to initialLimit)
+        // Initial sync: fetch all UIDs (or sliced if caller explicitly passes initialLimit)
         const allUids = await client.searchUids('ALL');
-        const initialLimit = options.initialLimit || 100;
-        uidsToFetch = allUids.slice(-initialLimit);
+        uidsToFetch = options.initialLimit ? allUids.slice(-options.initialLimit) : allUids;
       } else {
-        // Incremental sync: query UID <maxLocalUid + 1>:*
+        // Incremental sync & Historical Backfill:
         const rangeCriteria = `UID ${maxLocalUid + 1}:*`;
         const candidateUids = await client.searchUids(rangeCriteria);
         // Exclude any UID <= maxLocalUid (RFC 3501 quirk fallback)
-        uidsToFetch = candidateUids.filter(u => u > maxLocalUid);
+        const newUids = candidateUids.filter(u => u > maxLocalUid);
+
+        // Also backfill any missing historical messages if local store has gaps
+        let missingUids = [];
+        if (this.store.getFolderUids) {
+          const allRemoteUids = await client.searchUids('ALL');
+          const localUids = new Set(this.store.getFolderUids(folderId));
+          missingUids = allRemoteUids.filter(u => !localUids.has(u) && !newUids.includes(u));
+        }
+
+        uidsToFetch = [...newUids, ...missingUids];
       }
 
       let fetchedCount = 0;
@@ -193,23 +213,34 @@ export class SyncEngine extends EventEmitter {
           const range = chunk.join(',');
           const fetchedMessages = await client.fetchMessages(range);
 
-          const records = fetchedMessages.map(m => ({
-            accountId,
-            folderId,
-            uid: m.uid,
-            messageId: m.messageId,
-            threadId: m.threadId,
-            sender: m.sender || m.from,
-            senderEmail: m.senderEmail,
-            recipients: m.recipients,
-            subject: m.subject,
-            date: m.date,
-            bodySnippet: m.bodySnippet,
-            flags: m.flags,
-            isSeen: m.isSeen,
-            isFlagged: m.isFlagged,
-            size: m.size
-          }));
+          const records = fetchedMessages.map(m => {
+            let triage = { category: 'NORMAL', score: 50, isNoise: false, reason: null };
+            if (this.classifier?.classify) {
+              triage = this.classifier.classify(m);
+            }
+            return {
+              accountId,
+              folderId,
+              uid: m.uid,
+              messageId: m.messageId,
+              threadId: m.threadId,
+              sender: m.sender || m.from,
+              senderEmail: m.senderEmail,
+              recipients: m.recipients,
+              subject: m.subject,
+              date: m.date,
+              bodySnippet: m.bodySnippet,
+              flags: m.flags,
+              isSeen: m.isSeen,
+              isFlagged: m.isFlagged,
+              size: m.size,
+              category: triage.category || 'NORMAL',
+              triageCategory: triage.category || 'NORMAL',
+              triageScore: triage.score ?? 50,
+              isNoise: triage.isNoise ? 1 : 0,
+              triageReason: triage.reason || null
+            };
+          });
 
           this.store.upsertMessages(records);
           fetchedCount += records.length;

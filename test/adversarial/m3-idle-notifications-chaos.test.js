@@ -355,7 +355,8 @@ describe('Milestone 3 Adversarial Chaos: IDLE & Notification Conduits', () => {
           transport: nonIdleServer.getClientSocket(),
           provider: 'custom'
         }),
-        pollIntervalMs: 25
+        pollIntervalMs: 25,
+        nightPollIntervalMs: 25
       });
 
       let fallbackEmitted = false;
@@ -427,7 +428,8 @@ describe('Milestone 3 Adversarial Chaos: IDLE & Notification Conduits', () => {
           transport: mock.getClientSocket(),
           provider: 'custom'
         }),
-        pollIntervalMs: 20
+        pollIntervalMs: 20,
+        nightPollIntervalMs: 20
       });
 
       await idleManager.start();

@@ -826,6 +826,7 @@ input:focus {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  cursor: pointer;
   transition: border-color 0.2s, transform 0.15s;
 }
 
@@ -939,3 +940,115 @@ input:focus {
   border-color: var(--border-hover);
   color: var(--text-main);
 }
+
+.provider-pill-small {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+  display: inline-block;
+}
+
+/* Modal: Email Reader & Full Inspection */
+.reader-card {
+  max-width: 720px;
+  width: 90%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.reader-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 14px;
+}
+
+.reader-header-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.reader-subject-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-main);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.reader-details-grid {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin: 14px 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reader-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.reader-label {
+  color: var(--text-dim);
+  font-weight: 500;
+  min-width: 45px;
+}
+
+.reader-value {
+  color: var(--text-main);
+  word-break: break-all;
+}
+
+.reader-actions-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 0 12px;
+}
+
+.btn-toggle-read {
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-toggle-read:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border-hover);
+}
+
+.reader-body-container {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 45vh;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.reader-body-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-main);
+  word-break: break-word;
+}
+

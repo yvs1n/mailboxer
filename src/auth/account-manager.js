@@ -29,6 +29,7 @@ export class AccountManager {
     this.oauth = options.oauth || defaultOAuthManager;
     this.transport = options.transport;
     this.imapClientFactory = options.imapClientFactory;
+    this.store = options.store;
   }
 
   /**
@@ -48,10 +49,41 @@ export class AccountManager {
   }
 
   /**
+   * Mirrors an account record to SQLite store if store is injected.
+   * @param {object} saved
+   * @private
+   */
+  _mirrorAccountToStore(saved) {
+    if (this.store?.upsertAccount && saved) {
+      try {
+        this.store.upsertAccount({
+          id: saved.id,
+          email: saved.email,
+          provider: saved.provider,
+          name: saved.label
+        });
+      } catch {}
+    }
+  }
+
+  /**
    * Initializes the manager and underlying vault.
    */
   async init() {
     await this.vault.init();
+    if (this.store?.upsertAccount) {
+      try {
+        const publicAccounts = await this.vault.getPublicList();
+        for (const acc of publicAccounts) {
+          this.store.upsertAccount({
+            id: acc.id,
+            email: acc.email,
+            provider: acc.provider,
+            name: acc.label
+          });
+        }
+      } catch {}
+    }
   }
 
   /**
@@ -124,6 +156,7 @@ export class AccountManager {
     };
 
     const saved = await this.vault.saveAccount(accountToStore);
+    this._mirrorAccountToStore(saved);
     return {
       account: {
         id: saved.id,
@@ -200,6 +233,7 @@ export class AccountManager {
     };
 
     const saved = await this.vault.saveAccount(accountToStore);
+    this._mirrorAccountToStore(saved);
     return {
       account: {
         id: saved.id,
@@ -293,6 +327,7 @@ export class AccountManager {
     };
 
     const saved = await this.vault.saveAccount(accountToStore);
+    this._mirrorAccountToStore(saved);
     return {
       account: {
         id: saved.id,
@@ -345,6 +380,7 @@ export class AccountManager {
     };
 
     const saved = await this.vault.saveAccount(accountToStore);
+    this._mirrorAccountToStore(saved);
     return {
       account: {
         id: saved.id,
@@ -418,6 +454,7 @@ export class AccountManager {
 
     // 4. Save to vault permanently
     const saved = await this.vault.saveAccount(accountConfig);
+    this._mirrorAccountToStore(saved);
 
     return {
       id: saved.id,
@@ -428,6 +465,35 @@ export class AccountManager {
       connected: true,
       lastVerifiedAt: saved.lastVerifiedAt
     };
+  }
+
+  /**
+   * Retrieves decrypted IMAP configuration for an account (SyncEngine contract compatibility).
+   * @param {string} id - Account ID
+   * @returns {Promise<object>} Resolved AccountConfig
+   */
+  async getAccount(id) {
+    try {
+      return await this.getImapConfig(id);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Retrieves all decrypted IMAP configurations for active accounts.
+   * @returns {Promise<Array<object>>}
+   */
+  async getAccounts() {
+    const publicList = await this.vault.getPublicList();
+    const accounts = [];
+    for (const acc of publicList) {
+      try {
+        const full = await this.getImapConfig(acc.id);
+        if (full) accounts.push(full);
+      } catch {}
+    }
+    return accounts;
   }
 
   /**
@@ -478,6 +544,11 @@ export class AccountManager {
    * @returns {Promise<boolean>}
    */
   async logoutAccount(id) {
+    if (this.store?.deleteAccount) {
+      try {
+        this.store.deleteAccount(id);
+      } catch {}
+    }
     return this.vault.removeAccount(id);
   }
 }

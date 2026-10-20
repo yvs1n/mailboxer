@@ -592,7 +592,7 @@ export class SqliteStore {
         const senderEmail = msg.senderEmail || msg.sender_email || '';
         const subject = msg.subject || '';
         const date = msg.date || new Date().toISOString();
-        const bodySnippet = (msg.bodySnippet || msg.body_snippet || '').slice(0, 1000);
+        const bodySnippet = (msg.bodySnippet || msg.body_snippet || msg.body || '').slice(0, 1000);
 
         let flags = msg.flags || [];
         if (typeof flags === 'string') {
@@ -706,6 +706,18 @@ export class SqliteStore {
   }
 
   /**
+   * Retrieves all UIDs stored for a specific folder.
+   *
+   * @param {string} folderId - Folder ID
+   * @returns {number[]} Array of numeric UIDs
+   */
+  getFolderUids(folderId) {
+    if (!folderId) return [];
+    const rows = this.db.prepare('SELECT uid FROM messages WHERE folder_id = ?').all(folderId);
+    return rows.map(r => Number(r.uid));
+  }
+
+  /**
    * Queries messages with filtering, ordering, and pagination.
    *
    * @param {object} [options={}]
@@ -789,6 +801,7 @@ export class SqliteStore {
     const offset = Math.max(0, Number(options.offset || 0));
     const accountId = options.accountId || options.account_id;
     const folderId = options.folderId || options.folder_id;
+    const category = options.category;
 
     const tokens = tokenize(trimmed);
 
@@ -814,6 +827,10 @@ export class SqliteStore {
       if (folderId) {
         filterConditions.push('m.folder_id = ?');
         params.push(folderId);
+      }
+      if (category && category !== 'ALL') {
+        filterConditions.push('UPPER(m.category) = ?');
+        params.push(String(category).toUpperCase());
       }
 
       params.push(limit, offset);
@@ -845,6 +862,10 @@ export class SqliteStore {
     if (folderId) {
       filterConditions.push('m.folder_id = ?');
       params.push(folderId);
+    }
+    if (category && category !== 'ALL') {
+      filterConditions.push('UPPER(m.category) = ?');
+      params.push(String(category).toUpperCase());
     }
 
     params.push(limit, offset);

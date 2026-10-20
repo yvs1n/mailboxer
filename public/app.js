@@ -21,6 +21,13 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+if (typeof window !== 'undefined') {
+  window.escapeHtml = escapeHtml;
+}
+if (typeof globalThis !== 'undefined' && !globalThis.escapeHtml) {
+  globalThis.escapeHtml = escapeHtml;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const accountsContainer = document.getElementById('accounts-container');
   const btnRefresh = document.getElementById('btn-refresh-accounts');
@@ -360,16 +367,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       renderAccounts(data.accounts || []);
     } catch (err) {
-      accountsContainer.innerHTML = `
-        <div class="empty-state">
-          <p style="color:#ef4444;">Failed to load accounts: ${err.message}</p>
-        </div>
-      `;
+      if (accountsContainer) {
+        accountsContainer.innerHTML = `
+          <div class="empty-state">
+            <p style="color:#ef4444;">Failed to load accounts: ${escapeHtml(err.message)}</p>
+          </div>
+        `;
+      }
     }
   }
 
   function renderAccounts(accounts) {
-    if (!accounts || accounts.length === 0) {
+    if (!accountsContainer) return;
+    if (!Array.isArray(accounts) || accounts.length === 0) {
       accountsContainer.innerHTML = `
         <div class="empty-state">
           <div class="empty-state-icon">
@@ -386,34 +396,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     accountsContainer.innerHTML = accounts.map((acc) => {
-      const avatarClass = `avatar-${acc.provider || 'custom'}`;
+      if (!acc) return '';
+      const rawProvider = (acc.provider || 'custom').toLowerCase();
+      const avatarClass = `avatar-${rawProvider}`;
       const initials = (acc.provider || 'M').charAt(0).toUpperCase();
       const authBadge = acc.authType === 'oauth2' ? 'OAuth 2.0 (Permanent)' : 'Encrypted App Password';
+      const providerName = rawProvider === 'gmail' ? 'Google Mail'
+        : rawProvider === 'apple' ? 'Apple Mail'
+        : rawProvider === 'outlook' ? 'Microsoft Outlook'
+        : 'Custom IMAP';
+
+      const totalMsgs = acc.inboxStatus?.totalMessages ?? 0;
+      const unseenMsgs = acc.inboxStatus?.unseen ?? 0;
+      const statusLine = acc.inboxStatus
+        ? `<span>•</span><span style="color:#10b981;">📥 ${escapeHtml(totalMsgs)} msgs (${escapeHtml(unseenMsgs)} unread)</span>`
+        : '';
 
       return `
-        <div class="account-item-card" data-id="${acc.id}">
+        <div class="account-item-card" data-id="${escapeHtml(acc.id || '')}">
           <div class="account-info-left">
-            <div class="account-avatar ${avatarClass}">${initials}</div>
+            <div class="account-avatar ${avatarClass}">${escapeHtml(initials)}</div>
             <div class="account-details">
               <h4>
-                ${escapeHtml(acc.label || acc.email)}
+                ${escapeHtml(acc.label || acc.email || 'Untitled Account')}
                 <span class="permanent-badge">🔒 Permanent Session</span>
               </h4>
               <div class="account-meta-line">
-                <span>${escapeHtml(acc.email)}</span>
+                <span class="provider-pill-small">${escapeHtml(providerName)}</span>
+                <span>•</span>
+                <span>${escapeHtml(acc.email || '')}</span>
                 <span>•</span>
                 <span style="color:#94a3b8;">${authBadge}</span>
-                ${acc.inboxStatus ? `<span>•</span><span style="color:#10b981;">📥 ${acc.inboxStatus.totalMessages} msgs (${acc.inboxStatus.unseen} unread)</span>` : ''}
+                ${statusLine}
               </div>
             </div>
           </div>
           <div class="account-actions">
-            <button class="btn-test" data-id="${escapeHtml(acc.id)}">⚡ Test Connection</button>
-            <button class="btn-logout" data-id="${escapeHtml(acc.id)}" data-email="${escapeHtml(acc.email)}">🚪 Log Out</button>
+            <button class="btn-test" data-id="${escapeHtml(acc.id || '')}">⚡ Test Connection</button>
+            <button class="btn-logout" data-id="${escapeHtml(acc.id || '')}" data-email="${escapeHtml(acc.email || '')}">🚪 Log Out</button>
           </div>
         </div>
       `;
     }).join('');
+  }
+
+  if (typeof window !== 'undefined') {
+    window.renderAccounts = renderAccounts;
+  }
+  if (typeof globalThis !== 'undefined') {
+    globalThis.renderAccounts = renderAccounts;
   }
 
   // Event delegation on accountsContainer for connection tests and logouts
@@ -575,14 +606,171 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = isLoading;
   }
 
-  // --- 11. TRIAGE FEED CONTROLLER ---
+  // --- 11. TRIAGE FEED CONTROLLER & EMAIL READER ---
   let currentCategory = 'ALL';
   let currentSearchQuery = '';
   let searchDebounceTimer = null;
+  const currentMessagesMap = new Map();
 
   const messagesContainer = document.getElementById('messages-container');
   const triageTabs = document.getElementById('triage-category-tabs');
   const searchInput = document.getElementById('triage-search-input');
+
+  // Modal Email Reader Elements
+  const modalEmailReader = document.getElementById('modal-email-reader');
+  const btnCloseReader = document.getElementById('btn-close-reader');
+  const readerCategoryBadge = document.getElementById('reader-category-badge');
+  const readerSubject = document.getElementById('reader-subject');
+  const readerSender = document.getElementById('reader-sender');
+  const readerRecipient = document.getElementById('reader-recipient');
+  const readerTimestamp = document.getElementById('reader-timestamp');
+  const readerBodyContent = document.getElementById('reader-body-content');
+  const btnReaderToggleRead = document.getElementById('btn-reader-toggle-read');
+
+  let activeReaderMessage = null;
+
+  function closeEmailReader() {
+    if (modalEmailReader) {
+      modalEmailReader.classList.add('hidden');
+    }
+    activeReaderMessage = null;
+  }
+
+  function updateReaderToggleButton(isSeen) {
+    if (!btnReaderToggleRead) return;
+    if (isSeen) {
+      btnReaderToggleRead.textContent = 'Mark as Unread';
+      btnReaderToggleRead.setAttribute('data-target-state', 'unread');
+    } else {
+      btnReaderToggleRead.textContent = 'Mark as Read';
+      btnReaderToggleRead.setAttribute('data-target-state', 'read');
+    }
+  }
+
+  function updateCardSeenState(msgId, isSeen) {
+    const card = document.getElementById(`msg-${msgId}`);
+    if (!card) return;
+    const actionsRow = card.querySelector('.message-actions-row');
+    if (!actionsRow) return;
+
+    if (isSeen) {
+      actionsRow.innerHTML = '<span style="font-size:12px;color:var(--text-dim);">✓ Read</span>';
+    } else {
+      actionsRow.innerHTML = `<button class="btn-mark-read" data-id="${escapeHtml(msgId)}">Mark as Read</button>`;
+      const newBtn = actionsRow.querySelector('.btn-mark-read');
+      newBtn?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await markMessageRead(msgId, actionsRow);
+      });
+    }
+  }
+
+  async function markMessageRead(id, containerEl) {
+    try {
+      await fetch(`/api/messages/${encodeURIComponent(id)}/read`, { method: 'POST' });
+      const msg = currentMessagesMap.get(String(id));
+      if (msg) msg.isSeen = true;
+      if (containerEl) {
+        containerEl.innerHTML = '<span style="font-size:12px;color:var(--text-dim);">✓ Read</span>';
+      }
+      if (activeReaderMessage && String(activeReaderMessage.id) === String(id)) {
+        activeReaderMessage.isSeen = true;
+        updateReaderToggleButton(true);
+      }
+    } catch {}
+  }
+
+  function openEmailReader(msg) {
+    if (!modalEmailReader || !msg) return;
+    activeReaderMessage = msg;
+
+    const cat = (msg.category || 'NORMAL').toUpperCase();
+    const badgeClass = cat === 'VIP' ? 'badge-vip' : (cat === 'UPDATE' ? 'badge-update' : (cat === 'NOISE' ? 'badge-noise' : 'badge-normal'));
+    const badgeLabel = cat === 'VIP' ? '⭐ VIP / Urgent' : (cat === 'UPDATE' ? '📘 Coursework' : (cat === 'NOISE' ? '🔇 Muted Noise' : 'Normal'));
+
+    if (readerCategoryBadge) {
+      readerCategoryBadge.className = `badge-pill ${badgeClass}`;
+      readerCategoryBadge.textContent = badgeLabel;
+    }
+
+    if (readerSubject) {
+      readerSubject.textContent = msg.subject || '(No Subject)';
+    }
+
+    if (readerSender) {
+      const senderDisplay = msg.sender || msg.senderEmail || 'Unknown Sender';
+      const senderEmailDisplay = msg.senderEmail && msg.sender && !msg.sender.includes(msg.senderEmail) ? ` <${msg.senderEmail}>` : '';
+      readerSender.textContent = `${senderDisplay}${senderEmailDisplay}`;
+    }
+
+    if (readerRecipient) {
+      let recipientText = 'Undisclosed Recipients';
+      if (Array.isArray(msg.recipients) && msg.recipients.length > 0) {
+        recipientText = msg.recipients.join(', ');
+      } else if (typeof msg.recipients === 'string' && msg.recipients.trim()) {
+        try {
+          const parsed = JSON.parse(msg.recipients);
+          recipientText = Array.isArray(parsed) && parsed.length > 0 ? parsed.join(', ') : msg.recipients;
+        } catch {
+          recipientText = msg.recipients;
+        }
+      }
+      readerRecipient.textContent = recipientText;
+    }
+
+    if (readerTimestamp) {
+      readerTimestamp.textContent = msg.date
+        ? new Date(msg.date).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' })
+        : 'Unknown Date';
+    }
+
+    if (readerBodyContent) {
+      const bodyContent = msg.bodySnippet || msg.body || '(No body content available)';
+      readerBodyContent.innerHTML = escapeHtml(bodyContent).replace(/\n/g, '<br>');
+    }
+
+    updateReaderToggleButton(msg.isSeen);
+
+    // If message is unread, automatically mark as read on open
+    if (!msg.isSeen) {
+      fetch(`/api/messages/${encodeURIComponent(msg.id)}/read`, { method: 'POST' })
+        .then(() => {
+          msg.isSeen = true;
+          updateReaderToggleButton(true);
+          updateCardSeenState(msg.id, true);
+        })
+        .catch(() => {});
+    }
+
+    modalEmailReader.classList.remove('hidden');
+  }
+
+  // Toggle Read/Unread inside modal
+  btnReaderToggleRead?.addEventListener('click', async () => {
+    if (!activeReaderMessage) return;
+    const isCurrentlySeen = activeReaderMessage.isSeen;
+    const endpoint = isCurrentlySeen ? 'unread' : 'read';
+
+    try {
+      const res = await fetch(`/api/messages/${encodeURIComponent(activeReaderMessage.id)}/${endpoint}`, { method: 'POST' });
+      if (res.ok) {
+        activeReaderMessage.isSeen = !isCurrentlySeen;
+        updateReaderToggleButton(activeReaderMessage.isSeen);
+        updateCardSeenState(activeReaderMessage.id, activeReaderMessage.isSeen);
+      }
+    } catch {}
+  });
+
+  // Modal dismissal listeners
+  btnCloseReader?.addEventListener('click', closeEmailReader);
+  modalEmailReader?.addEventListener('click', (e) => {
+    if (e.target === modalEmailReader) closeEmailReader();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modalEmailReader && !modalEmailReader.classList.contains('hidden')) {
+      closeEmailReader();
+    }
+  });
 
   async function loadMessages() {
     if (!messagesContainer) return;
@@ -610,6 +798,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderMessages(messages) {
     if (!messagesContainer) return;
+    currentMessagesMap.clear();
+    for (const msg of messages) {
+      if (msg?.id) currentMessagesMap.set(String(msg.id), msg);
+    }
+
     if (messages.length === 0) {
       messagesContainer.innerHTML = `
         <div class="empty-state" style="padding: 40px; text-align: center; color: var(--text-dim);">
@@ -648,17 +841,36 @@ document.addEventListener('DOMContentLoaded', () => {
       `;
     }).join('');
 
-    // Attach read handlers
+    // Attach read handlers on buttons
     messagesContainer.querySelectorAll('.btn-mark-read').forEach(btn => {
       btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
         const id = e.target.getAttribute('data-id');
         if (!id) return;
-        try {
-          await fetch(`/api/messages/${encodeURIComponent(id)}/read`, { method: 'POST' });
-          e.target.parentElement.innerHTML = '<span style="font-size:12px;color:var(--text-dim);">✓ Read</span>';
-        } catch {}
+        await markMessageRead(id, e.target.parentElement);
       });
     });
+  }
+
+  // Card click event delegation to open reader modal
+  messagesContainer?.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    const card = e.target.closest('.message-card');
+    if (!card) return;
+    const msgId = card.id.replace(/^msg-/, '');
+    const msg = currentMessagesMap.get(msgId);
+    if (msg) {
+      openEmailReader(msg);
+    }
+  });
+
+  if (typeof window !== 'undefined') {
+    window.renderMessages = renderMessages;
+    window.openEmailReader = openEmailReader;
+  }
+  if (typeof globalThis !== 'undefined') {
+    globalThis.renderMessages = renderMessages;
+    globalThis.openEmailReader = openEmailReader;
   }
 
   // Triage category tab switching
