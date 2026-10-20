@@ -110,6 +110,20 @@ export class WebServer {
         const clientHost = isWildcard ? loopbackHost : this.host;
         const formattedHost = clientHost.includes(':') && !clientHost.startsWith('[') ? `[${clientHost}]` : clientHost;
         const address = `http://${formattedHost}:${actualPort}`;
+
+        // Start background email synchronization engine
+        if (this.syncEngine) {
+          this.syncEngine.startPeriodicSync(60000);
+          this.accountManager.listAccounts().then((accounts) => {
+            for (const acc of accounts) {
+              const id = acc.id || acc.email;
+              if (id) {
+                this.syncEngine.syncAccount(id, { throwOnError: false }).catch(() => {});
+              }
+            }
+          }).catch(() => {});
+        }
+
         resolve(address);
       });
     });
@@ -186,12 +200,30 @@ export class WebServer {
       return;
     }
 
+    // 1b. Trigger on-demand sync cycle across accounts
+    if (method === 'POST' && pathname === '/api/sync') {
+      if (this.syncEngine) {
+        const accounts = await this.accountManager.listAccounts();
+        for (const acc of accounts) {
+          const id = acc.id || acc.email;
+          if (id) {
+            this.syncEngine.syncAccount(id, { throwOnError: false }).catch(() => {});
+          }
+        }
+      }
+      this._json(res, 200, { success: true, message: 'Sync cycle triggered' });
+      return;
+    }
+
     // 2. Add Apple Account
     if (method === 'POST' && pathname === '/api/accounts/apple') {
       const body = await getBody();
       if (body === null) return;
       try {
         const result = await this.accountManager.addAppleAccount(body);
+        if (this.syncEngine && result.account?.id) {
+          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
+        }
         this._json(res, 201, result);
       } catch (err) {
         this._json(res, 400, {
@@ -209,6 +241,9 @@ export class WebServer {
       if (body === null) return;
       try {
         const result = await this.accountManager.addGoogleAccount(body);
+        if (this.syncEngine && result.account?.id) {
+          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
+        }
         this._json(res, 201, result);
       } catch (err) {
         this._json(res, 400, {
@@ -226,6 +261,9 @@ export class WebServer {
       if (body === null) return;
       try {
         const result = await this.accountManager.addOutlookAccount(body);
+        if (this.syncEngine && result.account?.id) {
+          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
+        }
         this._json(res, 201, result);
       } catch (err) {
         this._json(res, 400, {
@@ -243,6 +281,9 @@ export class WebServer {
       if (body === null) return;
       try {
         const result = await this.accountManager.addCustomAccount(body);
+        if (this.syncEngine && result.account?.id) {
+          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
+        }
         this._json(res, 201, result);
       } catch (err) {
         this._json(res, 400, {

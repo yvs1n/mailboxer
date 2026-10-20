@@ -8,6 +8,19 @@
  * - Instant IMAP diagnostics and explicit user logout
  */
 
+/**
+ * Utility to escape HTML entities to prevent XSS and rendering errors
+ */
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const accountsContainer = document.getElementById('accounts-container');
   const btnRefresh = document.getElementById('btn-refresh-accounts');
@@ -49,7 +62,18 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- 1. INITIAL LOAD ---
   loadAccounts();
 
-  btnRefresh?.addEventListener('click', loadAccounts);
+  btnRefresh?.addEventListener('click', async () => {
+    const originalText = btnRefresh.innerText;
+    btnRefresh.innerText = 'Syncing...';
+    try {
+      await fetch('/api/sync', { method: 'POST' });
+    } catch {}
+    await loadAccounts();
+    await loadMessages();
+    setTimeout(() => {
+      btnRefresh.innerText = originalText;
+    }, 1200);
+  });
 
   // --- 2. OAUTH POPUP EVENT & STORAGE LISTENERS ---
   function handleOAuthResult(data) {
@@ -210,6 +234,8 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Apple Mail connected successfully and encrypted in vault!', 'success');
       formApple.reset();
       loadAccounts();
+      setTimeout(loadMessages, 1500);
+      setTimeout(loadMessages, 4000);
     } catch (err) {
       showError(appleError, `Connection failed: ${err.message}`);
     } finally {
@@ -243,6 +269,8 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Google Mail connected successfully and encrypted in vault!', 'success');
       formGmail.reset();
       loadAccounts();
+      setTimeout(loadMessages, 1500);
+      setTimeout(loadMessages, 4000);
     } catch (err) {
       showError(gmailError, `Connection failed: ${err.message}`);
     } finally {
@@ -276,6 +304,8 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Microsoft Outlook connected successfully and encrypted in vault!', 'success');
       formOutlook.reset();
       loadAccounts();
+      setTimeout(loadMessages, 1500);
+      setTimeout(loadMessages, 4000);
     } catch (err) {
       showError(outlookError, `Connection failed: ${err.message}`);
     } finally {
@@ -314,6 +344,8 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Custom account connected and saved!', 'success');
       formCustom.reset();
       loadAccounts();
+      setTimeout(loadMessages, 1500);
+      setTimeout(loadMessages, 4000);
     } catch (err) {
       showError(customError, err.message);
     } finally {
@@ -769,4 +801,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initial load of messages and push status
   loadMessages();
   checkWebPushStatus();
+
+  // Poll messages every 15 seconds to stream incoming inbox updates
+  setInterval(() => {
+    loadMessages();
+  }, 15000);
 });
