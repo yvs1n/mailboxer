@@ -325,11 +325,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (syncStatusLabel) syncStatusLabel.textContent = 'Syncing...';
     if (btnRefresh) btnRefresh.innerText = 'Syncing...';
+    if (mobileBarStatusDot) mobileBarStatusDot.classList.add('syncing');
 
     try {
-      await fetch('/api/sync?await=true', { method: 'POST' });
-      showToast('All inboxes synchronized!', 'success');
-    } catch {}
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      await fetch('/api/sync', { method: 'POST', signal: controller.signal });
+      clearTimeout(timeoutId);
+      showToast('Sync initiated in background', 'info');
+    } catch {
+      showToast('Syncing in background', 'info');
+    }
 
     await loadAccounts();
     await loadMailboxSummary();
@@ -341,9 +347,12 @@ document.addEventListener('DOMContentLoaded', () => {
         btnSyncAll.style.transition = 'none';
       }, 800);
     }
-    if (syncStatusLabel) syncStatusLabel.textContent = 'Synced just now';
+    if (syncStatusLabel) syncStatusLabel.textContent = 'Synced';
+    if (mobileBarStatusDot) mobileBarStatusDot.classList.remove('syncing');
     if (btnRefresh) btnRefresh.innerText = 'Refresh Status';
   }
+
+  const syncAllAccounts = triggerFullSync;
 
   // ==========================================
   // 2. ACCOUNT LIST & SIDEBAR SUB-LIST
@@ -1436,7 +1445,82 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = isLoading;
   }
 
-  // Export globally for browser and test environments
+  // ==========================================
+  // MOBILE NAVIGATION & PWA REGISTRATION
+  // ==========================================
+  if (mobileBottomNav) {
+    mobileBottomNav.addEventListener('click', (e) => {
+      const item = e.target.closest('.mobile-nav-item');
+      if (!item) return;
+
+      const tab = item.getAttribute('data-tab');
+      if (tab === 'accounts') {
+        openAccountsModal();
+        return;
+      }
+
+      mobileBottomNav.querySelectorAll('.mobile-nav-item').forEach(b => b.classList.remove('active'));
+      item.classList.add('active');
+
+      sidebarAccountsList?.querySelectorAll('.account-nav-item').forEach(el => el.classList.remove('active'));
+
+      if (tab === 'inbox') {
+        currentCategory = 'ALL';
+        selectedAccountId = null;
+        navAllInboxes?.classList.add('active');
+        updateActiveViewHeader('All Inboxes', 'All active accounts');
+      } else if (tab === 'vip') {
+        currentCategory = 'VIP';
+        document.getElementById('nav-vip-inbox')?.classList.add('active');
+        updateActiveViewHeader('VIP / Urgent', 'Priority & actionable messages');
+      } else if (tab === 'courses') {
+        currentCategory = 'UPDATE';
+        document.getElementById('nav-update-inbox')?.classList.add('active');
+        updateActiveViewHeader('Coursework & LMS', 'Assignments, announcements & grades');
+      } else if (tab === 'noise') {
+        currentCategory = 'NOISE';
+        document.getElementById('nav-noise-inbox')?.classList.add('active');
+        updateActiveViewHeader('Promotions & Noise', 'Marketing, receipts & digests');
+      }
+
+      if (desktopReaderPane) desktopReaderPane.classList.remove('mobile-open');
+
+      currentOffset = 0;
+      loadMessages({ append: false });
+    });
+  }
+
+  btnMobileMenu?.addEventListener('click', () => {
+    const sidebar = document.querySelector('.mailbox-sidebar');
+    if (sidebar) sidebar.classList.add('drawer-open');
+    if (mobileSidebarBackdrop) mobileSidebarBackdrop.classList.remove('hidden');
+  });
+
+  mobileSidebarBackdrop?.addEventListener('click', () => {
+    const sidebar = document.querySelector('.mailbox-sidebar');
+    if (sidebar) sidebar.classList.remove('drawer-open');
+    if (mobileSidebarBackdrop) mobileSidebarBackdrop.classList.add('hidden');
+  });
+
+  btnMobileSync?.addEventListener('click', async () => {
+    await triggerFullSync();
+  });
+
+  btnMobileSearchToggle?.addEventListener('click', () => {
+    if (searchInput) {
+      searchInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      searchInput.focus();
+    }
+  });
+
+  // PWA Service Worker Registration
+  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+  }
+
+    // Export globally for browser and test environments
   if (typeof window !== 'undefined') {
     window.renderAccounts = renderAccounts;
     window.renderMessages = renderMessages;

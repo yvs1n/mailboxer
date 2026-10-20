@@ -291,8 +291,13 @@ export class SyncEngine extends EventEmitter {
         unseenCount: unseenUids.length
       });
 
-      // 5. Remote Deletion Pruning via UID SEARCH ALL
-      const allRemoteUids = await client.searchUids('ALL');
+      // 5. Remote Deletion Pruning via UID SEARCH (matching sinceCriteria)
+      let allRemoteUids = [];
+      try {
+        allRemoteUids = await client.searchUids(sinceCriteria);
+      } catch {
+        allRemoteUids = await client.searchUids('ALL');
+      }
       const prunedCount = this.store.pruneDeletedUids(folderId, allRemoteUids);
       if (prunedCount > 0) {
         this.emit('messagesPruned', {

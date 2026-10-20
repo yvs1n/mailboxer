@@ -1111,10 +1111,14 @@ export class SqliteStore {
   purgeOlderThan(isoDate) {
     if (!isoDate) return 0;
     try {
+      this.db.exec('BEGIN');
+      this.db.prepare('DELETE FROM message_search_index WHERE message_id IN (SELECT id FROM messages WHERE date < ?)').run(isoDate);
       const stmt = this.db.prepare('DELETE FROM messages WHERE date < ?');
       const info = stmt.run(isoDate);
+      this.db.exec('COMMIT');
       return info?.changes || 0;
     } catch {
+      try { this.db.exec('ROLLBACK'); } catch {}
       return 0;
     }
   }
