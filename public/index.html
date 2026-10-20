@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mailboxer — Unified Inboxes & Triage Hub</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-brand">
+        <div class="brand-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+            <polyline points="22,6 12,13 2,6"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">Mailboxer</h1>
+          <p class="brand-tagline">Permanent Multi-Account Email Hub & Smart Triage</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="vault-status-pill">
+          <span class="status-indicator"></span>
+          <span>Encrypted Vault Active</span>
+        </div>
+        <button id="btn-oauth-settings" class="btn-ghost" title="OAuth API Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          OAuth Keys
+        </button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <!-- Section: Add Accounts -->
+      <section class="onboarding-section">
+        <div class="section-title-wrap">
+          <h2 class="section-title">Connect Your Inboxes</h2>
+          <p class="section-subtitle">
+            Sign in once and remain permanently logged in. Refresh tokens and credentials are securely encrypted on your device.
+          </p>
+        </div>
+
+        <!-- Guided 3-Provider App Password Onboarding Cards Grid -->
+        <div class="cards-grid">
+          <!-- 1. Apple Mail Card -->
+          <div class="provider-card apple-card">
+            <div class="card-header">
+              <div class="card-icon-title">
+                <div class="card-icon apple-icon">
+                  <svg width="22" height="22" viewBox="0 0 170 170" fill="currentColor">
+                    <path d="M150.37 130.25c-2.45 5.66-5.35 10.87-8.71 15.66-4.58 6.53-8.33 11.05-11.22 13.56-4.48 4.12-9.28 6.23-14.42 6.35-3.69 0-8.14-1.05-13.32-3.18-5.19-2.12-9.97-3.17-14.34-3.17-4.58 0-9.49 1.05-14.75 3.17-5.26 2.13-9.5 3.24-12.74 3.35-4.35.13-9.16-1.9-14.42-6.08-3.7-3.04-7.69-7.79-11.97-14.24-5.87-8.8-10.43-18.73-13.68-29.78-3.25-11.05-4.88-21.73-4.88-32.04 0-14.45 3.65-26.68 10.96-36.68 7.31-10 16.59-15.09 27.84-15.27 4.13 0 9.09 1.13 14.88 3.38 5.79 2.26 9.87 3.44 12.24 3.56 2.01-.12 6.13-1.35 12.35-3.69 6.22-2.34 11.23-3.39 15.03-3.17 11.31.62 20.39 4.87 27.24 12.76-9.84 5.98-14.65 14.19-14.43 24.62.22 8.16 3.35 15.06 9.38 20.7 6.03 5.64 13.25 8.91 21.66 9.82-1.9 5.86-4.24 11.72-7.03 17.58zm-29.35-104.99c0-6.19 2.22-11.97 6.66-17.34 4.44-5.37 9.84-8.87 16.2-10.5 1.09 6.07.11 11.75-2.94 17.04-3.05 5.29-8.47 9.17-16.26 11.64-.66-.28-1.88-.47-3.66-.84z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="card-title">Apple Mail (iCloud)</h3>
+                  <p class="card-desc">@icloud.com • @me.com • @mac.com</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- The Direct 30-Second Link Banner -->
+            <div class="guided-notice-box">
+              <span class="notice-badge">Apple Security Requirement</span>
+              <p class="notice-text">
+                Apple requires an App-Specific Password to protect your iCloud account.
+                <a href="https://appleid.apple.com/account/manage/section/passwords" target="_blank" rel="noopener" class="highlight-link">
+                  [Click here to generate one in 30 seconds] →
+                </a>
+              </p>
+            </div>
+
+            <!-- Form -->
+            <form id="form-apple-login" class="login-form">
+              <div class="form-group">
+                <label for="apple-email">iCloud Email Address</label>
+                <input type="email" id="apple-email" required placeholder="name@icloud.com" autocomplete="email">
+              </div>
+
+              <div class="form-group">
+                <label for="apple-password">16-Character App-Specific Password</label>
+                <div class="password-input-wrap">
+                  <input type="password" id="apple-password" required placeholder="xxxx-xxxx-xxxx-xxxx" maxlength="24">
+                  <button type="button" class="btn-toggle-visibility" tabindex="-1">👁</button>
+                </div>
+                <span class="field-hint">Hyphens & spaces are automatically formatted.</span>
+              </div>
+
+              <div class="form-group">
+                <label for="apple-label">Account Label (Optional)</label>
+                <input type="text" id="apple-label" placeholder="Personal Apple Mail">
+              </div>
+
+              <div id="apple-error" class="form-error hidden"></div>
+
+              <button type="submit" id="btn-submit-apple" class="btn-submit">
+                <span class="btn-text">Connect & Save to Vault</span>
+                <span class="btn-spinner hidden"></span>
+              </button>
+            </form>
+          </div>
+
+          <!-- 2. Google Mail Card -->
+          <div class="provider-card gmail-card">
+            <div class="card-header">
+              <div class="card-icon-title">
+                <div class="card-icon gmail-icon">
+                  <svg width="22" height="22" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+                    <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.36 24 12 24z"/>
+                    <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"/>
+                    <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.36 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="card-title">Google Mail (Gmail)</h3>
+                  <p class="card-desc">@gmail.com • Google Workspace</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Google Direct 30-Second Link Banner -->
+            <div class="guided-notice-box google-notice-box">
+              <span class="notice-badge google-badge">Google Security Requirement</span>
+              <p class="notice-text">
+                Requires 2-Step Verification enabled. Generate a 16-character App Password:
+                <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener" class="highlight-link">
+                  [Click here to generate one in 30 seconds] →
+                </a>
+              </p>
+            </div>
+
+            <!-- Form -->
+            <form id="form-gmail-login" class="login-form">
+              <div class="form-group">
+                <label for="gmail-email">Google Email Address</label>
+                <input type="email" id="gmail-email" required placeholder="name@gmail.com" autocomplete="email">
+              </div>
+
+              <div class="form-group">
+                <label for="gmail-password">16-Character App Password</label>
+                <div class="password-input-wrap">
+                  <input type="password" id="gmail-password" required placeholder="xxxx-xxxx-xxxx-xxxx" maxlength="24">
+                  <button type="button" class="btn-toggle-visibility" tabindex="-1">👁</button>
+                </div>
+                <span class="field-hint">4x4 grouping formatted automatically. Spaces & hyphens accepted.</span>
+              </div>
+
+              <div class="form-group">
+                <label for="gmail-label">Account Label (Optional)</label>
+                <input type="text" id="gmail-label" placeholder="Personal Google Mail">
+              </div>
+
+              <div id="gmail-error" class="form-error hidden"></div>
+
+              <button type="submit" id="btn-submit-gmail" class="btn-submit btn-google-submit">
+                <span class="btn-text">Connect & Save to Vault</span>
+                <span class="btn-spinner hidden"></span>
+              </button>
+            </form>
+          </div>
+
+          <!-- 3. Microsoft Outlook Card -->
+          <div class="provider-card outlook-card">
+            <div class="card-header">
+              <div class="card-icon-title">
+                <div class="card-icon outlook-icon">
+                  <svg width="22" height="22" viewBox="0 0 23 23">
+                    <path fill="#f35325" d="M1 1h10v10H1z"/>
+                    <path fill="#81bc06" d="M12 1h10v10H12z"/>
+                    <path fill="#05a6f0" d="M1 12h10v10H1z"/>
+                    <path fill="#ffba08" d="M12 12h10v10H12z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="card-title">Microsoft Outlook</h3>
+                  <p class="card-desc">@outlook.com • @hotmail.com • University .edu</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Microsoft Direct 30-Second Link Banner -->
+            <div class="guided-notice-box outlook-notice-box">
+              <span class="notice-badge outlook-badge">Microsoft Direct Access</span>
+              <p class="notice-text">
+                Use your university / work account password, or generate an App Password in
+                <a href="https://account.live.com/proofs/manage/additional" target="_blank" rel="noopener" class="highlight-link">
+                  [Click here to generate one in 30 seconds] →
+                </a>
+                (or visit <a href="https://account.live.com" target="_blank" rel="noopener" class="highlight-link">account.live.com</a>)
+              </p>
+            </div>
+
+            <!-- Form -->
+            <form id="form-outlook-login" class="login-form">
+              <div class="form-group">
+                <label for="outlook-email">Outlook / University Email</label>
+                <input type="email" id="outlook-email" required placeholder="user@outlook.com or student@uni.edu" autocomplete="email">
+              </div>
+
+              <div class="form-group">
+                <label for="outlook-password">Password / App Password</label>
+                <div class="password-input-wrap">
+                  <input type="password" id="outlook-password" required placeholder="Account Password or App Password">
+                  <button type="button" class="btn-toggle-visibility" tabindex="-1">👁</button>
+                </div>
+                <span class="field-hint">Accepts standard password or Microsoft 16-character App Password.</span>
+              </div>
+
+              <div class="form-group">
+                <label for="outlook-label">Account Label (Optional)</label>
+                <input type="text" id="outlook-label" placeholder="University / Personal Outlook">
+              </div>
+
+              <div id="outlook-error" class="form-error hidden"></div>
+
+              <button type="submit" id="btn-submit-outlook" class="btn-submit btn-outlook-submit">
+                <span class="btn-text">Connect & Save to Vault</span>
+                <span class="btn-spinner hidden"></span>
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Secondary Accordion: Custom Server & OAuth 2.0 -->
+        <details class="advanced-accordion">
+          <summary class="accordion-summary">
+            <span>⚙️ Secondary Options: Custom IMAP Server & OAuth 2.0</span>
+          </summary>
+          <div class="advanced-accordion-content">
+            <div class="cards-grid">
+              <!-- Custom / University IMAP Card -->
+              <div class="provider-card custom-card">
+                <div class="card-header">
+                  <div class="card-icon-title">
+                    <div class="card-icon custom-icon">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                        <line x1="8" y1="21" x2="16" y2="21"/>
+                        <line x1="12" y1="17" x2="12" y2="21"/>
+                      </svg>
+                    </div>
+                    <div>
+                      <h3 class="card-title">Custom / School IMAP</h3>
+                      <p class="card-desc">Direct IMAP & SMTP Host Setup</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="guided-notice-box info-box">
+                  <span class="notice-badge info-badge">Direct Connection</span>
+                  <p class="notice-text">
+                    For private mail servers with dedicated host addresses.
+                  </p>
+                </div>
+
+                <form id="form-custom-login" class="login-form">
+                  <div class="form-group">
+                    <label for="custom-email">Email Address</label>
+                    <input type="email" id="custom-email" required placeholder="student@university.edu">
+                  </div>
+
+                  <div class="form-group">
+                    <label for="custom-password">Password / Token</label>
+                    <div class="password-input-wrap">
+                      <input type="password" id="custom-password" required placeholder="Account Password">
+                      <button type="button" class="btn-toggle-visibility" tabindex="-1">👁</button>
+                    </div>
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="custom-imap-host">IMAP Host</label>
+                      <input type="text" id="custom-imap-host" required placeholder="mail.university.edu">
+                    </div>
+                    <div class="form-group" style="max-width: 90px;">
+                      <label for="custom-imap-port">Port</label>
+                      <input type="number" id="custom-imap-port" value="993" required>
+                    </div>
+                  </div>
+
+                  <div id="custom-error" class="form-error hidden"></div>
+
+                  <button type="submit" id="btn-submit-custom" class="btn-submit">
+                    <span class="btn-text">Connect & Save to Vault</span>
+                    <span class="btn-spinner hidden"></span>
+                  </button>
+                </form>
+              </div>
+
+              <!-- OAuth 2.0 Fast Connect Card -->
+              <div class="provider-card oauth-card">
+                <div class="card-header">
+                  <div class="card-icon-title">
+                    <div class="card-icon" style="background:#1e293b;color:#38bdf8;">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                        <polyline points="10 17 15 12 10 7"/>
+                        <line x1="15" y1="12" x2="3" y2="12"/>
+                      </svg>
+                    </div>
+                    <div>
+                      <h3 class="card-title">OAuth 2.0 Fast Connect</h3>
+                      <p class="card-desc">Popup flows for developer-configured apps</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="guided-notice-box info-box">
+                  <span class="notice-badge info-badge">Requires Client ID & Secret</span>
+                  <p class="notice-text">
+                    Requires OAuth credentials configured via "OAuth Keys" in header.
+                  </p>
+                </div>
+
+                <div class="oauth-button-grid" style="margin-bottom:0;">
+                  <button id="btn-connect-google" class="btn-oauth btn-google" type="button">
+                    <svg class="oauth-icon" viewBox="0 0 24 24" width="20" height="20">
+                      <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.36 24 12 24z"/>
+                      <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"/>
+                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.36 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"/>
+                    </svg>
+                    <div class="oauth-text">
+                      <span class="oauth-title">Connect with Google</span>
+                    </div>
+                  </button>
+
+                  <button id="btn-connect-microsoft" class="btn-oauth btn-microsoft" type="button">
+                    <svg class="oauth-icon" viewBox="0 0 23 23" width="18" height="18">
+                      <path fill="#f35325" d="M1 1h10v10H1z"/>
+                      <path fill="#81bc06" d="M12 1h10v10H12z"/>
+                      <path fill="#05a6f0" d="M1 12h10v10H1z"/>
+                      <path fill="#ffba08" d="M12 12h10v10H12z"/>
+                    </svg>
+                    <div class="oauth-text">
+                      <span class="oauth-title">Connect with Microsoft</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <!-- Section: Active Accounts Dashboard -->
+      <section class="accounts-section">
+        <div class="section-title-wrap">
+          <div class="flex-between">
+            <div>
+              <h2 class="section-title">Connected Inboxes</h2>
+              <p class="section-subtitle">Permanently logged in. Test connections or manage your accounts below.</p>
+            </div>
+            <button id="btn-refresh-accounts" class="btn-ghost">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"/>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+              Refresh Status
+            </button>
+          </div>
+        </div>
+
+        <div id="accounts-container" class="accounts-list">
+          <!-- Dynamically populated -->
+          <div class="loading-state">
+            <div class="spinner-inline"></div>
+            <p>Loading your connected inboxes...</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section: Real-Time Notification Settings -->
+      <section class="notifications-section">
+        <div class="section-title-wrap">
+          <h2 class="section-title">VIP Alerts & Notification Conduits</h2>
+          <p class="section-subtitle">Dual alert conduits delivering instant notifications for VIP / Urgent emails.</p>
+        </div>
+
+        <div class="cards-grid">
+          <!-- Web Push Card -->
+          <div class="provider-card notification-card">
+            <div class="card-header">
+              <div class="card-icon-title">
+                <div class="card-icon" style="background:#1e1b4b;color:#a855f7;">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                    <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="card-title">Browser Web Push (PWA)</h3>
+                  <p class="card-desc">Zero-dependency RFC 8291/8292 native encryption</p>
+                </div>
+              </div>
+            </div>
+            <div class="guided-notice-box info-box">
+              <span class="notice-badge info-badge">W3C Push API</span>
+              <p class="notice-text">
+                Receives instant notifications even when Mailboxer tab is closed.
+              </p>
+            </div>
+            <div style="margin-top: 16px;">
+              <button id="btn-toggle-webpush" class="btn-submit" type="button">
+                <span id="webpush-btn-text">Enable Web Push Notifications</span>
+              </button>
+              <div id="webpush-status-text" class="field-hint" style="margin-top: 8px;">Status: Push not yet subscribed</div>
+            </div>
+          </div>
+
+          <!-- ntfy.sh Card -->
+          <div class="provider-card notification-card">
+            <div class="card-header">
+              <div class="card-icon-title">
+                <div class="card-icon" style="background:#064e3b;color:#34d399;">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="card-title">ntfy.sh Mobile Buzz</h3>
+                  <p class="card-desc">Instant urgent alerts on iOS, Android & Desktop</p>
+                </div>
+              </div>
+            </div>
+            <div class="guided-notice-box info-box">
+              <span class="notice-badge info-badge">Instant Push</span>
+              <p class="notice-text">
+                Priority 5 persistent buzz with interactive action buttons.
+              </p>
+            </div>
+            <div class="login-form" style="margin-top: 16px;">
+              <div class="form-group">
+                <label for="ntfy-topic-input">ntfy.sh Topic Channel</label>
+                <input type="text" id="ntfy-topic-input" placeholder="e.g. mailboxer-vip-myname">
+              </div>
+              <div class="form-row" style="margin-bottom:0;">
+                <button id="btn-save-ntfy" class="btn-ghost" type="button">Save Topic</button>
+                <button id="btn-test-alert" class="btn-submit" type="button" style="width:auto;flex:1;">Send Test Alert</button>
+              </div>
+              <div id="alert-test-status" class="field-hint" style="margin-top: 8px;"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section: Smart Anti-Noise Triage Inbox -->
+      <section class="triage-section">
+        <div class="section-title-wrap">
+          <div class="flex-between">
+            <div>
+              <h2 class="section-title">Smart Anti-Noise Triage Inbox</h2>
+              <p class="section-subtitle">Real-time classification elevated by IMAP IDLE. Noise is muted automatically.</p>
+            </div>
+            <div class="triage-tabs" id="triage-category-tabs">
+              <button class="triage-tab active" data-category="ALL">All Inboxes</button>
+              <button class="triage-tab tab-vip" data-category="VIP">⭐ VIP / Urgent</button>
+              <button class="triage-tab tab-update" data-category="UPDATE">📘 Coursework & LMS</button>
+              <button class="triage-tab tab-noise" data-category="NOISE">🔇 Promotions & Noise</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Search Bar -->
+        <div class="triage-search-wrap">
+          <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input type="text" id="triage-search-input" placeholder="Sub-20ms search across sender, subject, and body snippet...">
+        </div>
+
+        <!-- Messages Feed -->
+        <div id="messages-container" class="messages-feed">
+          <div class="loading-state">
+            <div class="spinner-inline"></div>
+            <p>Loading messages...</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Modal: OAuth Settings -->
+    <div id="modal-oauth-settings" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 class="modal-title">OAuth 2.0 Credentials</h3>
+          <button id="btn-close-modal" class="btn-close">&times;</button>
+        </div>
+        <p class="modal-desc">
+          Configure your Google Cloud or Microsoft Azure App credentials for 1-click OAuth sign-ins.
+        </p>
+
+        <form id="form-oauth-settings" class="settings-form">
+          <div class="provider-setting-block">
+            <h4 class="setting-provider-title">Google Cloud Credentials</h4>
+            <div class="form-group">
+              <label>Google Client ID</label>
+              <input type="text" id="cfg-google-id" placeholder="xxxx.apps.googleusercontent.com">
+            </div>
+            <div class="form-group">
+              <label>Google Client Secret</label>
+              <input type="password" id="cfg-google-secret" placeholder="GOCSPX-xxxx">
+            </div>
+          </div>
+
+          <div class="provider-setting-block">
+            <h4 class="setting-provider-title">Microsoft Azure Credentials</h4>
+            <div class="form-group">
+              <label>Microsoft Client ID (Application ID)</label>
+              <input type="text" id="cfg-ms-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+            </div>
+            <div class="form-group">
+              <label>Microsoft Client Secret</label>
+              <input type="password" id="cfg-ms-secret" placeholder="Value from Azure Portal">
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" id="btn-cancel-modal" class="btn-ghost">Cancel</button>
+            <button type="submit" class="btn-submit">Save Settings</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
