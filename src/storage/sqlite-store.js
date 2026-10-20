@@ -776,6 +776,134 @@ export class SqliteStore {
     return rows.map(formatMessageRow);
   }
 
+  /**
+   * Retrieves total message count matching optional filters.
+   *
+   * @param {object} [options={}]
+   * @returns {number}
+   */
+  getMessageCount(options = {}) {
+    const conditions = [];
+    const params = [];
+
+    const accountId = options.accountId || options.account_id;
+    if (accountId) {
+      conditions.push('account_id = ?');
+      params.push(accountId);
+    }
+
+    const folderId = options.folderId || options.folder_id;
+    if (folderId) {
+      conditions.push('folder_id = ?');
+      params.push(folderId);
+    }
+
+    if (options.isSeen !== undefined || options.is_seen !== undefined) {
+      const seenVal = (options.isSeen ?? options.is_seen) ? 1 : 0;
+      conditions.push('is_seen = ?');
+      params.push(seenVal);
+    }
+
+    if (options.isFlagged !== undefined || options.is_flagged !== undefined) {
+      const flaggedVal = (options.isFlagged ?? options.is_flagged) ? 1 : 0;
+      conditions.push('is_flagged = ?');
+      params.push(flaggedVal);
+    }
+
+    if (options.category && options.category !== 'ALL') {
+      conditions.push('UPPER(category) = ?');
+      params.push(String(options.category).toUpperCase());
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sql = `SELECT COUNT(*) AS total FROM messages ${whereClause}`;
+    const row = this.db.prepare(sql).get(...params);
+    return Number(row?.total || 0);
+  }
+
+  /**
+   * Sets or unsets the flagged/starred status of a message.
+   *
+   * @param {string} messageId - Message ID
+   * @param {boolean} isFlagged - Whether message is flagged/starred
+   * @returns {boolean}
+   */
+  setMessageFlag(messageId, isFlagged) {
+    if (!messageId) return false;
+    const flagVal = isFlagged ? 1 : 0;
+    this.db.prepare("UPDATE messages SET is_flagged = ?, updated_at = datetime('now') WHERE id = ? OR message_id = ?").run(flagVal, messageId, messageId);
+    return true;
+  }
+
+  /**
+   * Deletes a message by primary key or message_id.
+   *
+   * @param {string} messageId - Message ID
+   * @returns {boolean}
+   */
+  deleteMessage(messageId) {
+    if (!messageId) return false;
+    this.db.prepare("DELETE FROM messages WHERE id = ? OR message_id = ?").run(messageId, messageId);
+    return true;
+  }
+
+  /**
+   * Retrieves high-level mailbox statistics for the sidebar and triage views.
+   *
+   * @returns {object} Mailbox summary
+   */
+  getMailboxSummary() {
+    const totalUnreadRow = this.db.prepare('SELECT COUNT(*) AS c FROM messages WHERE is_seen = 0').get();
+    const totalUnread = Number(totalUnreadRow?.c || 0);
+
+    const totalRow = this.db.prepare('SELECT COUNT(*) AS c FROM messages').get();
+    const totalMessages = Number(totalRow?.c || 0);
+
+    const catRows = this.db.prepare(`
+      SELECT category,
+             COUNT(*) AS total,
+             SUM(CASE WHEN is_seen = 0 THEN 1 ELSE 0 END) AS unread
+      FROM messages
+      GROUP BY category
+    `).all();
+
+    const categories = {
+      VIP: { total: 0, unread: 0 },
+      UPDATE: { total: 0, unread: 0 },
+      NOISE: { total: 0, unread: 0 },
+      NORMAL: { total: 0, unread: 0 }
+    };
+    for (const r of catRows) {
+      const cat = (r.category || 'NORMAL').toUpperCase();
+      if (!categories[cat]) categories[cat] = { total: 0, unread: 0 };
+      categories[cat].total = Number(r.total || 0);
+      categories[cat].unread = Number(r.unread || 0);
+    }
+
+    const accRows = this.db.prepare(`
+      SELECT account_id,
+             COUNT(*) AS total,
+             SUM(CASE WHEN is_seen = 0 THEN 1 ELSE 0 END) AS unread
+      FROM messages
+      GROUP BY account_id
+    `).all();
+
+    const accountCounts = {};
+    for (const r of accRows) {
+      accountCounts[r.account_id] = {
+        total: Number(r.total || 0),
+        unread: Number(r.unread || 0)
+      };
+    }
+
+    return {
+      totalMessages,
+      totalUnread,
+      categories,
+      accountCounts
+    };
+  }
+
   // ==========================================
   // FAST FULL-TEXT SEARCH (< 20ms SLA)
   // ==========================================

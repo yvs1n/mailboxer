@@ -35,7 +35,10 @@ export class SyncEngine extends EventEmitter {
     this.store = options.store || options.db || new SqliteStore(options.dbPath || ':memory:');
     this.accountManager = options.accountManager || defaultAccountManager;
     this.classifier = options.classifier || defaultClassifier;
-    this.createClient = options.createClient || ((config) => new ImapClient({ accountConfig: config, ...options.clientOptions }));
+    this.createClient = options.createClient ||
+      (this.accountManager?.imapClientFactory ? (cfg) => this.accountManager.imapClientFactory(cfg) : null) ||
+      (this.accountManager?._createImapClient ? (cfg) => this.accountManager._createImapClient(cfg) : null) ||
+      ((config) => new ImapClient({ accountConfig: config, ...options.clientOptions }));
     this.batchSize = options.batchSize || 50;
     this.syncIntervalMs = options.syncIntervalMs || 60000;
 
@@ -86,25 +89,32 @@ export class SyncEngine extends EventEmitter {
     }
 
     const client = this.createClient(accountConfig);
-    if (!client.isConnected) {
-      await client.connect({
-        host: accountConfig.imap?.host || accountConfig.host,
-        port: accountConfig.imap?.port || accountConfig.port,
-        secure: accountConfig.imap?.secure ?? accountConfig.secure ?? true,
-        provider: accountConfig.provider
-      });
-    }
+    try {
+      if (!client.isConnected) {
+        await client.connect({
+          host: accountConfig.imap?.host || accountConfig.host,
+          port: accountConfig.imap?.port || accountConfig.port,
+          secure: accountConfig.imap?.secure ?? accountConfig.secure ?? true,
+          provider: accountConfig.provider
+        });
+      }
 
-    if (!client.isAuthenticated) {
-      const user = accountConfig.auth?.user || accountConfig.email;
-      const pass = accountConfig.auth?.pass || accountConfig.appPassword || accountConfig.password;
-      await client.login(user, pass, {
-        type: accountConfig.auth?.type,
-        accessToken: accountConfig.auth?.accessToken
-      });
-    }
+      if (!client.isAuthenticated) {
+        const user = accountConfig.auth?.user || accountConfig.email;
+        const pass = accountConfig.auth?.pass || accountConfig.appPassword || accountConfig.password;
+        await client.login(user, pass, {
+          type: accountConfig.auth?.type,
+          accessToken: accountConfig.auth?.accessToken
+        });
+      }
 
-    return client;
+      return client;
+    } catch (err) {
+      try {
+        await client.destroy?.();
+      } catch {}
+      throw err;
+    }
   }
 
   /**

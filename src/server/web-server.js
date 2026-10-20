@@ -147,6 +147,7 @@ export class WebServer {
       this.store.close();
     }
     if (this.server) {
+      this.server.closeAllConnections?.();
       return new Promise((resolve) => this.server.close(resolve));
     }
   }
@@ -209,16 +210,26 @@ export class WebServer {
 
     // 1b. Trigger on-demand sync cycle across accounts
     if (method === 'POST' && pathname === '/api/sync') {
+      const wait = url.searchParams.get('await') === 'true';
       if (this.syncEngine) {
         const accounts = await this.accountManager.listAccounts();
+        const promises = [];
         for (const acc of accounts) {
           const id = acc.id || acc.email;
           if (id) {
-            this.syncEngine.syncAccount(id, { throwOnError: false }).catch(() => {});
+            const p = this.syncEngine.syncAccount(id, { throwOnError: false }).catch(() => {});
+            promises.push(p);
           }
         }
+        if (wait) {
+          await Promise.all(promises);
+        }
       }
-      this._json(res, 200, { success: true, message: 'Sync cycle triggered' });
+      this._json(res, 200, {
+        success: true,
+        message: 'Sync cycle triggered',
+        lastSyncAt: this.syncEngine?.lastSyncAt || new Date().toISOString()
+      });
       return;
     }
 
@@ -665,13 +676,40 @@ export class WebServer {
     }
 
     // --- MESSAGES & SEARCH ENDPOINTS ---
+    if (method === 'GET' && pathname === '/api/mailbox/summary') {
+      try {
+        const summary = this.store.getMailboxSummary();
+        summary.lastSyncAt = this.syncEngine?.lastSyncAt || null;
+        this._json(res, 200, summary);
+      } catch (err) {
+        this._json(res, 500, { error: err.message });
+      }
+      return;
+    }
+
     if (method === 'GET' && pathname === '/api/messages') {
       const q = url.searchParams.get('q');
       const category = url.searchParams.get('category');
       const accountId = url.searchParams.get('accountId');
       const folderId = url.searchParams.get('folderId');
-      const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 200);
+      const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 1000);
       const offset = Number(url.searchParams.get('offset')) || 0;
+
+      let isSeen;
+      if (url.searchParams.has('isSeen')) {
+        isSeen = url.searchParams.get('isSeen') === 'true';
+      } else if (url.searchParams.get('unread') === 'true') {
+        isSeen = false;
+      }
+
+      let isFlagged;
+      if (url.searchParams.has('isFlagged')) {
+        isFlagged = url.searchParams.get('isFlagged') === 'true';
+      } else if (url.searchParams.get('starred') === 'true') {
+        isFlagged = true;
+      }
+
+      const filterCategory = category && category !== 'ALL' ? category : undefined;
 
       if (q) {
         let messages = this.store.search(q, {
@@ -679,24 +717,80 @@ export class WebServer {
           folderId,
           limit,
           offset,
-          category: category && category !== 'ALL' ? category : undefined
+          category: filterCategory
         });
-        if (category && category !== 'ALL') {
-          const catUpper = category.toUpperCase();
+        if (filterCategory) {
+          const catUpper = filterCategory.toUpperCase();
           messages = messages.filter(m => (m.category || '').toUpperCase() === catUpper);
         }
-        this._json(res, 200, { messages, count: messages.length, query: q, category: category || 'ALL' });
+        if (isSeen !== undefined) {
+          messages = messages.filter(m => Boolean(m.isSeen) === isSeen);
+        }
+        if (isFlagged !== undefined) {
+          messages = messages.filter(m => Boolean(m.isFlagged) === isFlagged);
+        }
+        this._json(res, 200, {
+          messages,
+          count: messages.length,
+          total: messages.length,
+          query: q,
+          category: category || 'ALL',
+          limit,
+          offset
+        });
         return;
       }
+
+      const total = this.store.getMessageCount({
+        accountId,
+        folderId,
+        category: filterCategory,
+        isSeen,
+        isFlagged
+      });
 
       const messages = this.store.getMessages({
         accountId,
         folderId,
-        category: category && category !== 'ALL' ? category : undefined,
+        category: filterCategory,
+        isSeen,
+        isFlagged,
         limit,
         offset
       });
-      this._json(res, 200, { messages, count: messages.length, category: category || 'ALL' });
+      this._json(res, 200, {
+        messages,
+        count: messages.length,
+        total,
+        category: category || 'ALL',
+        accountId: accountId || null,
+        folderId: folderId || null,
+        limit,
+        offset
+      });
+      return;
+    }
+
+    const singleMsgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
+    if (method === 'GET' && singleMsgMatch) {
+      const messageId = decodeURIComponent(singleMsgMatch[1]);
+      const msg = this.store.getMessage(messageId);
+      if (!msg) {
+        this._json(res, 404, { error: 'Message not found' });
+        return;
+      }
+      this._json(res, 200, { message: msg });
+      return;
+    }
+
+    if (method === 'DELETE' && singleMsgMatch) {
+      const messageId = decodeURIComponent(singleMsgMatch[1]);
+      try {
+        const deleted = this.store.deleteMessage(messageId);
+        this._json(res, 200, { success: deleted, messageId });
+      } catch (err) {
+        this._json(res, 400, { error: err.message });
+      }
       return;
     }
 
@@ -721,6 +815,40 @@ export class WebServer {
       } catch (err) {
         this._json(res, 400, { error: err.message });
       }
+      return;
+    }
+
+    const starMatch = pathname.match(/^\/api\/messages\/([^/]+)\/(star|flag)$/);
+    if (method === 'POST' && starMatch) {
+      const messageId = decodeURIComponent(starMatch[1]);
+      try {
+        this.store.setMessageFlag(messageId, true);
+        this._json(res, 200, { success: true, messageId, isFlagged: true });
+      } catch (err) {
+        this._json(res, 400, { error: err.message });
+      }
+      return;
+    }
+
+    const unstarMatch = pathname.match(/^\/api\/messages\/([^/]+)\/(unstar|unflag)$/);
+    if (method === 'POST' && unstarMatch) {
+      const messageId = decodeURIComponent(unstarMatch[1]);
+      try {
+        this.store.setMessageFlag(messageId, false);
+        this._json(res, 200, { success: true, messageId, isFlagged: false });
+      } catch (err) {
+        this._json(res, 400, { error: err.message });
+      }
+      return;
+    }
+
+    const accountSyncMatch = pathname.match(/^\/api\/accounts\/([^/]+)\/sync$/);
+    if (method === 'POST' && accountSyncMatch) {
+      const accountId = decodeURIComponent(accountSyncMatch[1]);
+      if (this.syncEngine) {
+        this.syncEngine.syncAccount(accountId, { throwOnError: false }).catch(() => {});
+      }
+      this._json(res, 200, { success: true, accountId, message: 'Account sync triggered' });
       return;
     }
 
