@@ -333,9 +333,13 @@ export class TlsSocketTransport extends SocketTransport {
       servername,
       minVersion: options.minVersion ?? tlsConfig.minVersion ?? this._defaultOptions.minVersion,
       maxVersion: options.maxVersion ?? tlsConfig.maxVersion ?? this._defaultOptions.maxVersion,
-      rejectUnauthorized: options.rejectUnauthorized ?? tlsConfig.rejectUnauthorized ?? this._defaultOptions.rejectUnauthorized,
-      ca: options.ca ?? tlsConfig.ca ?? this._defaultOptions.ca
+      rejectUnauthorized: options.rejectUnauthorized ?? tlsConfig.rejectUnauthorized ?? this._defaultOptions.rejectUnauthorized
     };
+
+    const ca = options.ca ?? tlsConfig.ca ?? this._defaultOptions.ca;
+    if (ca !== undefined) {
+      tlsOpts.ca = ca;
+    }
 
     if (options.socket || tlsConfig.socket) {
       tlsOpts.socket = options.socket ?? tlsConfig.socket;
