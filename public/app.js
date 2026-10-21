@@ -78,9 +78,7 @@ function cleanMimeBody(raw) {
   const boundaryMatch = text.match(/^--([a-zA-Z0-9_\-./=]+)/m);
   if (boundaryMatch) {
     const boundary = boundaryMatch[1];
-    const boundaryEscaped = boundary.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\if (typeof globalThis !== 'undefined' && !globalThis.escapeHtml) {
-  globalThis.escapeHtml = escapeHtml;
-}');
+    const boundaryEscaped = boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const parts = text.split(new RegExp('--' + boundaryEscaped + '(?:--)?'));
 
     let chosenPart = '';
