@@ -32,5 +32,6 @@ data/
 .vscode/
 .idea/
 .agents/
+agent.md
 *.swp
 *.swo
