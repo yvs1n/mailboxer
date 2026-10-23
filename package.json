@@ -16,7 +16,7 @@
     "verify": "node bin/verify.js"
   },
   "engines": {
-    "node": ">=20.6.0"
+    "node": ">=22.13.0"
   },
   "keywords": [
     "email",
