@@ -14,6 +14,7 @@
 import { EventEmitter } from 'node:events';
 import { performance } from 'node:perf_hooks';
 import { SocketTransport, TlsSocketTransport } from './transport.js';
+import { decodeHeaderValue } from '../mail/mime.js';
 import {
   classifyProtocolResponse,
   classifySocketError
@@ -155,24 +156,9 @@ export function parseCapabilities(lines) {
  * @returns {string} Decoded UTF-8 string
  */
 export function decodeMimeHeader(str) {
-  if (!str || typeof str !== 'string') return '';
-  return str.replace(/=\?([^?]+)\?([BQbq])\?([^?]+)\?=/g, (_, charset, encoding, data) => {
-    try {
-      const enc = encoding.toUpperCase();
-      if (enc === 'B') {
-        const buf = Buffer.from(data, 'base64');
-        return buf.toString(charset.toLowerCase().includes('utf') ? 'utf8' : 'latin1');
-      } else if (enc === 'Q') {
-        const decoded = data.replace(/_/g, ' ').replace(/=([A-Fa-f0-9]{2})/g, (__, hex) => {
-          return String.fromCharCode(parseInt(hex, 16));
-        });
-        return decoded;
-      }
-    } catch {
-      return data;
-    }
-    return data;
-  });
+  // Real charset decoding (UTF-8 Q-words, ISO-8859-x, Windows-125x, ...) and
+  // joining of adjacent encoded words.
+  return decodeHeaderValue(str);
 }
 
 /**
@@ -529,11 +515,17 @@ export function cleanMimeBody(raw) {
  * Parses untagged FETCH responses containing message headers and body previews.
  *
  * @param {string[]} lines - Untagged lines from UID FETCH
+ * @param {object} [options]
+ * @param {boolean} [options.binary=false] - Lines are latin1 "byte strings" (literal
+ *   lengths are octets); extracted literals are decoded to UTF-8.
  * @returns {object[]} Parsed message objects
  */
-export function parseFetchResponses(lines) {
+export function parseFetchResponses(lines, options = {}) {
   if (!Array.isArray(lines)) return [];
   const results = [];
+  const decode = options.binary
+    ? (s) => (s ? Buffer.from(s, 'latin1').toString('utf8') : s)
+    : (s) => s;
 
   for (const line of lines) {
     if (!/^\*\s+\d+\s+FETCH\b/i.test(line)) continue;
@@ -592,6 +584,9 @@ export function parseFetchResponses(lines) {
         bodySnippet = quotedMatch[1];
       }
     }
+
+    rawHeaders = decode(rawHeaders);
+    bodySnippet = decode(bodySnippet);
 
     const headers = parseHeaders(rawHeaders);
     const sender = headers.from || '';
@@ -830,7 +825,12 @@ export class ImapClient extends EventEmitter {
    * @private
    */
   _onData(chunk) {
-    this._buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    // Buffer as "binary" (latin1: one char per byte) so IMAP literal {N} octet
+    // counts line up exactly, even for UTF-8 or 8-bit content split across chunks.
+    // Complete lines are decoded to UTF-8 before parsing.
+    this._buffer += typeof chunk === 'string'
+      ? Buffer.from(chunk, 'utf8').toString('latin1')
+      : chunk.toString('latin1');
     this._drainLines();
   }
 
@@ -875,7 +875,10 @@ export class ImapClient extends EventEmitter {
         continue;
       }
 
-      this._handleLine(fullLine);
+      if (this._currentCommand?.captureRaw && fullLine.startsWith('*')) {
+        this._currentCommand.rawUntagged.push(fullLine);
+      }
+      this._handleLine(Buffer.from(fullLine, 'latin1').toString('utf8'));
     }
   }
 
@@ -928,6 +931,7 @@ export class ImapClient extends EventEmitter {
             status: 'OK',
             rest: rest.trim(),
             untagged: cmd.untagged,
+            rawUntagged: cmd.rawUntagged,
             line
           });
         } else {
@@ -1196,6 +1200,9 @@ export class ImapClient extends EventEmitter {
           tag,
           commandText: redact ? `${tag} [REDACTED]` : `${tag} ${commandText}`,
           untagged: [],
+          // Byte-exact (latin1) copies of untagged lines, for raw message downloads.
+          captureRaw: Boolean(options.captureRaw),
+          rawUntagged: [],
           timer,
           resolve,
           reject
@@ -1550,8 +1557,139 @@ export class ImapClient extends EventEmitter {
     const itemsStr = items.join(' ');
     const range = String(uidRange);
 
-    const res = await this.sendCommand(`UID FETCH ${range} (${itemsStr})`);
-    return parseFetchResponses(res.untagged);
+    const res = await this.sendCommand(`UID FETCH ${range} (${itemsStr})`, {
+      captureRaw: true,
+      timeoutMs: options.timeoutMs ?? Math.max(this.options.commandTimeoutMs || 10000, 30000)
+    });
+    return parseFetchResponses(res.rawUntagged, { binary: true });
+  }
+
+  /**
+   * Downloads complete raw RFC 822 messages (headers + body + attachments).
+   * Uses BODY.PEEK[] so the \Seen flag is not changed.
+   *
+   * @param {string|number} uidRange - UID or UID set
+   * @param {object} [options]
+   * @param {number} [options.timeoutMs=60000]
+   * @returns {Promise<Array<{uid: number, raw: Buffer}>>}
+   */
+  async fetchRawMessages(uidRange, options = {}) {
+    if (!this.isAuthenticated) {
+      throw new Error(`Cannot fetch messages in unauthenticated state ${this._state}`);
+    }
+    if (this._state !== IMAP_STATES.QUERYING) {
+      this._setState(IMAP_STATES.QUERYING);
+    }
+
+    const res = await this.sendCommand(`UID FETCH ${String(uidRange)} (UID BODY.PEEK[])`, {
+      captureRaw: true,
+      timeoutMs: options.timeoutMs ?? 60000
+    });
+
+    const out = [];
+    for (const line of res.rawUntagged) {
+      if (!/^\*\s+\d+\s+FETCH\b/i.test(line)) continue;
+      const uidMatch = line.match(/\bUID\s+(\d+)\b/i);
+      const m = line.match(/BODY\[\]\s*\{(\d+)\}\r\n/i);
+      if (!m) continue;
+      const start = m.index + m[0].length;
+      const len = parseInt(m[1], 10);
+      out.push({
+        uid: uidMatch ? parseInt(uidMatch[1], 10) : null,
+        raw: Buffer.from(line.slice(start, start + len), 'latin1')
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Moves messages to another mailbox. Uses RFC 6851 MOVE when available,
+   * otherwise COPY + \Deleted + EXPUNGE.
+   *
+   * @param {string|number} uidSet - UID or UID set in the selected mailbox
+   * @param {string} destination - Target mailbox path
+   */
+  async moveMessages(uidSet, destination) {
+    if (!this.isAuthenticated) {
+      throw new Error(`Cannot move messages in unauthenticated state ${this._state}`);
+    }
+    if (this.hasCapability('MOVE')) {
+      return this.sendCommand(`UID MOVE ${uidSet} ${escapeImapString(destination)}`);
+    }
+    await this.sendCommand(`UID COPY ${uidSet} ${escapeImapString(destination)}`);
+    return this.deleteMessages(uidSet);
+  }
+
+  /**
+   * Permanently removes messages from the selected mailbox (\Deleted + EXPUNGE).
+   * Uses UID EXPUNGE (RFC 4315 UIDPLUS) when available so other messages
+   * already marked \Deleted by another client are not touched.
+   *
+   * @param {string|number} uidSet
+   */
+  async deleteMessages(uidSet) {
+    await this.storeFlags(uidSet, ['\\Deleted'], '+FLAGS');
+    if (this.hasCapability('UIDPLUS')) {
+      return this.sendCommand(`UID EXPUNGE ${uidSet}`);
+    }
+    return this.sendCommand('EXPUNGE');
+  }
+
+  /**
+   * Appends a raw message to a mailbox (e.g. saving a sent copy).
+   *
+   * @param {string} mailbox
+   * @param {string|Buffer} raw - RFC 5322 message
+   * @param {string[]} [flags=['\\Seen']]
+   */
+  async appendMessage(mailbox, raw, flags = ['\\Seen']) {
+    if (!this.isAuthenticated) {
+      throw new Error(`Cannot append in unauthenticated state ${this._state}`);
+    }
+    const data = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw), 'utf8');
+    const timeoutMs = Math.max(this.options.commandTimeoutMs || 10000, 60000);
+
+    return this._commandQueue.enqueue(() => new Promise((resolve, reject) => {
+      const tag = this._nextTag();
+      const timer = setTimeout(() => {
+        if (this._currentCommand?.tag === tag) {
+          this._currentCommand = null;
+          reject(createErrorByCode(ERROR_CODES.CONNECTION_TIMEOUT, `APPEND timed out after ${timeoutMs}ms`, { provider: this.options.provider }));
+        }
+      }, timeoutMs);
+
+      this._currentCommand = {
+        tag,
+        commandText: `${tag} APPEND ${mailbox}`,
+        untagged: [],
+        captureRaw: false,
+        rawUntagged: [],
+        timer,
+        resolve,
+        reject,
+        // Server sent "+ Ready": stream the literal, then the closing CRLF.
+        onContinuation: () => {
+          this._currentCommand.onContinuation = null;
+          this.transport.write(Buffer.concat([data, Buffer.from('\r\n')]));
+        }
+      };
+      this.transport.write(`${tag} APPEND ${escapeImapString(mailbox)} (${flags.join(' ')}) {${data.length}}\r\n`);
+    }));
+  }
+
+  /**
+   * Immediately tears down the connection without a LOGOUT round trip.
+   */
+  destroy() {
+    try {
+      if (this.transport && !this.transport.destroyed) {
+        this.transport.destroy();
+      }
+    } catch {}
+    this._detachTransportListeners();
+    if (this._state !== IMAP_STATES.DISCONNECTED) {
+      this._state = IMAP_STATES.DISCONNECTED;
+    }
   }
 
   /**

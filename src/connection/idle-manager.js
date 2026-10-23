@@ -91,6 +91,19 @@ export class IdleManager extends EventEmitter {
   }
 
   /**
+   * Starts monitoring one account if it isn't already monitored.
+   * Lets callers start accounts individually (e.g. after their first good sync)
+   * instead of all at once with start().
+   *
+   * @param {string} accountId
+   */
+  async ensureAccount(accountId) {
+    if (!accountId || this._sessions.has(accountId)) return;
+    this._running = true;
+    await this.startAccount(accountId);
+  }
+
+  /**
    * Stops all active monitoring sessions cleanly.
    */
   async stop() {
@@ -422,6 +435,13 @@ export class IdleManager extends EventEmitter {
    * @private
    */
   async _handleNewMessagesDetected(session) {
+    // Several EXISTS updates can arrive back to back; run one sync at a time.
+    if (session.handling) {
+      session.pendingRecheck = true;
+      return;
+    }
+    session.handling = true;
+
     const client = session.client;
     const wasIdling = client && client.state === IMAP_STATES.IDLE;
 
@@ -433,19 +453,25 @@ export class IdleManager extends EventEmitter {
       session.lastSyncAt = new Date().toISOString();
 
       let newMessages = [];
+      let syncReportedMessages = false;
 
       // If SyncEngine is injected, run incremental sync on this folder
       if (this.syncEngine?.syncFolder) {
         const syncResult = await this.syncEngine.syncFolder(session.accountId, session.folderName);
         if (syncResult && Array.isArray(syncResult.fetchedMessages)) {
           newMessages = syncResult.fetchedMessages;
+          syncReportedMessages = true;
         } else if (syncResult && Array.isArray(syncResult.messages)) {
-          newMessages = syncResult.messages;
+          // Only genuinely new arrivals, not historical backfill
+          newMessages = syncResult.messages.filter(m => m.isNew !== false);
+          syncReportedMessages = true;
         }
       }
 
-      // If no messages returned directly from syncResult, check database for recently ingested messages
-      if (newMessages.length === 0 && this.store?.getMessages) {
+      // Without a sync result, fall back to the most recent stored messages.
+      // (Skipped when the sync engine reported what it stored, so the same
+      // messages are not alerted on again.)
+      if (!syncReportedMessages && newMessages.length === 0 && this.store?.getMessages) {
         const folder = this.store.getFolder(session.accountId, session.folderName);
         if (folder) {
           newMessages = this.store.getMessages({
@@ -475,6 +501,7 @@ export class IdleManager extends EventEmitter {
     } catch (err) {
       this.emit('syncError', { accountId: session.accountId, error: err });
     } finally {
+      session.handling = false;
       // Re-enter IDLE if we were previously idling
       if (wasIdling && !session.destroyed && this._running && client && client.isConnected) {
         try {
@@ -484,6 +511,10 @@ export class IdleManager extends EventEmitter {
         } catch (err) {
           this._scheduleReconnect(session);
         }
+      }
+      if (session.pendingRecheck && !session.destroyed && this._running) {
+        session.pendingRecheck = false;
+        this._handleNewMessagesDetected(session).catch(() => {});
       }
     }
   }

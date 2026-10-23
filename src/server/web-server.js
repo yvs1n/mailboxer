@@ -14,6 +14,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultAccountManager } from '../auth/account-manager.js';
@@ -22,11 +23,18 @@ import { Classifier } from '../triage/classifier.js';
 import { NotificationManager } from '../notifications/manager.js';
 import { SyncEngine } from '../sync/sync-engine.js';
 import { IdleManager } from '../connection/idle-manager.js';
+import { ImapClient } from '../connection/imap-client.js';
+import { MailService } from '../mail/mail-service.js';
 import { AuthGuard, isCrossSiteRequest } from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PUBLIC_DIR = path.resolve(__dirname, '../../public');
+
+let APP_VERSION = '0.0.0';
+try {
+  APP_VERSION = JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8')).version || APP_VERSION;
+} catch {}
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -85,16 +93,73 @@ export class WebServer {
     this.syncEngine = options.syncEngine || new SyncEngine({
       store: this.store,
       accountManager: this.accountManager,
-      classifier: this.classifier
+      classifier: this.classifier,
+      // A unified inbox: only INBOX by default (no Spam/Trash/All Mail duplicates)
+      folders: process.env.MAILBOXER_SYNC_FOLDERS || 'INBOX'
     });
+
+    // Real-time new-mail detection. Notifications are sent from one place (see
+    // _onMessageAdded), so the IDLE manager itself doesn't dispatch them.
+    this.enableIdle = options.enableIdle ?? (process.env.MAILBOXER_IDLE !== 'false');
     this.idleManager = options.idleManager || new IdleManager({
       syncEngine: this.syncEngine,
       store: this.store,
       accountManager: this.accountManager,
-      notificationManager: this.notificationManager,
-      classifier: this.classifier
+      notificationManager: null,
+      classifier: this.classifier,
+      createClient: (cfg) => (this.accountManager._createImapClient ? this.accountManager._createImapClient(cfg) : new ImapClient({ accountConfig: cfg }))
     });
+    // Reconnects retry with backoff; log each distinct error once per account.
+    const lastIdleError = new Map();
+    this.idleManager.on?.('error', ({ accountId, error } = {}) => {
+      const msg = error?.message || String(error);
+      if (lastIdleError.get(accountId) === msg) return;
+      lastIdleError.set(accountId, msg);
+      console.error(`[Mailboxer] IDLE monitor error for ${accountId}: ${msg}`);
+    });
+    this.idleManager.on?.('idle', ({ accountId } = {}) => lastIdleError.delete(accountId));
+
+    this.mailService = options.mailService || new MailService({
+      syncEngine: this.syncEngine,
+      store: this.store,
+      accountManager: this.accountManager
+    });
+
+    this._onMessageAdded = this._onMessageAdded.bind(this);
+    this.syncEngine.on?.('messageAdded', this._onMessageAdded);
+
     this.server = null;
+  }
+
+  /**
+   * Starts syncing and live monitoring for a newly connected account.
+   * @private
+   */
+  _onAccountAdded(accountId) {
+    if (!accountId) return;
+    // IDLE monitoring begins once this first sync succeeds (see start())
+    this.syncEngine?.syncAccount(accountId, { throwOnError: false }).catch(() => {});
+  }
+
+  /**
+   * Sends a VIP alert for genuinely new, unread inbox mail.
+   * @private
+   */
+  _onMessageAdded(record) {
+    if (!record?.isNew || record.isSeen || !this.notificationManager?.dispatch) return;
+    const isInbox = String(record.folderId || '').toUpperCase().endsWith(':INBOX');
+    const ageMs = Date.now() - new Date(record.date).getTime();
+    // Skip mail that only looks new (moved in from elsewhere, or very old)
+    if (!isInbox || !(ageMs < 48 * 60 * 60 * 1000)) return;
+    const triage = {
+      category: record.category,
+      score: record.triageScore,
+      shouldNotify: Boolean(record.shouldNotify)
+    };
+    if (!triage.shouldNotify && triage.category !== 'VIP') return;
+    this.notificationManager.dispatch(record, triage).catch((err) => {
+      console.error(`[Mailboxer] Notification dispatch failed: ${err.message}`);
+    });
   }
 
   async start() {
@@ -136,9 +201,12 @@ export class WebServer {
         const formattedHost = clientHost.includes(':') && !clientHost.startsWith('[') ? `[${clientHost}]` : clientHost;
         const address = `http://${formattedHost}:${actualPort}`;
 
-        // Start background email synchronization engine
+        // Start background email synchronization engine. With IDLE pushing new
+        // mail instantly, the full sweep (flags, deletions) can run less often.
         if (this.syncEngine) {
-          this.syncEngine.startPeriodicSync(60000);
+          const envInterval = Number(process.env.MAILBOXER_SYNC_INTERVAL_MS);
+          const interval = envInterval > 0 ? envInterval : (this.enableIdle ? 5 * 60 * 1000 : 60000);
+          this.syncEngine.startPeriodicSync(interval);
           this.accountManager.listAccounts().then((accounts) => {
             for (const acc of accounts) {
               const id = acc.id || acc.email;
@@ -148,6 +216,14 @@ export class WebServer {
             }
           }).catch(() => {});
         }
+        // Live IDLE monitoring starts per account after its first successful sync,
+        // so accounts with bad credentials aren't hammered by two retry loops.
+        if (this.enableIdle && this.idleManager?.ensureAccount && this.syncEngine?.on) {
+          this._onSyncComplete = ({ accountId } = {}) => {
+            if (this.server?.listening && accountId) this.idleManager.ensureAccount(accountId).catch(() => {});
+          };
+          this.syncEngine.on('syncComplete', this._onSyncComplete);
+        }
 
         resolve(address);
       });
@@ -155,6 +231,11 @@ export class WebServer {
   }
 
   async stop() {
+    if (this._onSyncComplete) {
+      this.syncEngine?.removeListener?.('syncComplete', this._onSyncComplete);
+      this._onSyncComplete = null;
+    }
+    this.syncEngine?.removeListener?.('messageAdded', this._onMessageAdded);
     if (this.idleManager) {
       await this.idleManager.stop().catch(() => {});
     }
@@ -280,7 +361,12 @@ export class WebServer {
     // 1. List accounts
     if (method === 'GET' && pathname === '/api/accounts') {
       const accounts = await this.accountManager.listAccounts();
-      this._json(res, 200, { accounts });
+      // Attach last sync time and last error so the UI can flag broken accounts
+      const withStatus = accounts.map((acc) => {
+        const status = this.syncEngine?.getAccountStatus?.(acc.id);
+        return status ? { ...acc, lastSyncAt: status.lastSyncAt, syncError: status.lastError, syncErrorAt: status.lastErrorAt } : acc;
+      });
+      this._json(res, 200, { accounts: withStatus });
       return;
     }
 
@@ -309,75 +395,20 @@ export class WebServer {
       return;
     }
 
-    // 2. Add Apple Account
-    if (method === 'POST' && pathname === '/api/accounts/apple') {
+    // 2. Add an account (Apple, Google, Outlook, custom IMAP)
+    const addAccountHandlers = {
+      '/api/accounts/apple': 'addAppleAccount',
+      '/api/accounts/gmail': 'addGoogleAccount',
+      '/api/accounts/google': 'addGoogleAccount',
+      '/api/accounts/outlook': 'addOutlookAccount',
+      '/api/accounts/custom': 'addCustomAccount'
+    };
+    if (method === 'POST' && Object.hasOwn(addAccountHandlers, pathname)) {
       const body = await getBody();
       if (body === null) return;
       try {
-        const result = await this.accountManager.addAppleAccount(body);
-        if (this.syncEngine && result.account?.id) {
-          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
-        }
-        this._json(res, 201, result);
-      } catch (err) {
-        this._json(res, 400, {
-          error: err.message,
-          code: err.code || 'VALIDATION_ERROR',
-          remediationAdvice: err.remediationAdvice || ''
-        });
-      }
-      return;
-    }
-
-    // 2b. Add Google Account (POST /api/accounts/gmail or /api/accounts/google)
-    if (method === 'POST' && (pathname === '/api/accounts/gmail' || pathname === '/api/accounts/google')) {
-      const body = await getBody();
-      if (body === null) return;
-      try {
-        const result = await this.accountManager.addGoogleAccount(body);
-        if (this.syncEngine && result.account?.id) {
-          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
-        }
-        this._json(res, 201, result);
-      } catch (err) {
-        this._json(res, 400, {
-          error: err.message,
-          code: err.code || 'VALIDATION_ERROR',
-          remediationAdvice: err.remediationAdvice || ''
-        });
-      }
-      return;
-    }
-
-    // 2c. Add Microsoft Outlook Account (POST /api/accounts/outlook)
-    if (method === 'POST' && pathname === '/api/accounts/outlook') {
-      const body = await getBody();
-      if (body === null) return;
-      try {
-        const result = await this.accountManager.addOutlookAccount(body);
-        if (this.syncEngine && result.account?.id) {
-          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
-        }
-        this._json(res, 201, result);
-      } catch (err) {
-        this._json(res, 400, {
-          error: err.message,
-          code: err.code || 'VALIDATION_ERROR',
-          remediationAdvice: err.remediationAdvice || ''
-        });
-      }
-      return;
-    }
-
-    // 3. Add Custom / University Account
-    if (method === 'POST' && pathname === '/api/accounts/custom') {
-      const body = await getBody();
-      if (body === null) return;
-      try {
-        const result = await this.accountManager.addCustomAccount(body);
-        if (this.syncEngine && result.account?.id) {
-          this.syncEngine.syncAccount(result.account.id, { throwOnError: false }).catch(() => {});
-        }
+        const result = await this.accountManager[addAccountHandlers[pathname]](body);
+        this._onAccountAdded(result.account?.id);
         this._json(res, 201, result);
       } catch (err) {
         this._json(res, 400, {
@@ -438,6 +469,9 @@ export class WebServer {
     const deleteMatch = pathname.match(/^\/api\/accounts\/([^/]+)$/);
     if (method === 'DELETE' && deleteMatch) {
       const accountId = decodeURIComponent(deleteMatch[1]);
+      if (this.idleManager?.stopAccount) {
+        await this.idleManager.stopAccount(accountId).catch(() => {});
+      }
       const removed = await this.accountManager.logoutAccount(accountId);
       this._json(res, removed ? 200 : 404, { success: removed });
       return;
@@ -565,9 +599,7 @@ export class WebServer {
 
       try {
         const account = await this.accountManager.handleOAuthCallback(provider, code);
-        if (this.syncEngine && account?.id) {
-          this.syncEngine.syncAccount(account.id, { throwOnError: false }).catch(() => {});
-        }
+        this._onAccountAdded(account?.id);
         if (wantsJson) {
           this._json(res, 200, { success: true, account });
           return;
@@ -628,7 +660,7 @@ export class WebServer {
         status,
         timestamp: new Date().toISOString(),
         uptimeSeconds: Math.round(uptimeSeconds * 10) / 10,
-        version: '0.1.0',
+        version: APP_VERSION,
         environment: process.env.NODE_ENV || 'development',
         system: {
           nodeVersion: process.version,
@@ -740,6 +772,14 @@ export class WebServer {
       return;
     }
 
+    if (method === 'POST' && pathname === '/api/notifications/unsubscribe') {
+      const body = await getBody();
+      if (body === null) return;
+      const removed = body.endpoint ? this.store.deletePushSubscription(body.endpoint) : false;
+      this._json(res, 200, { success: Boolean(removed) });
+      return;
+    }
+
     if (method === 'POST' && pathname === '/api/notifications/test') {
       const body = (await getBody()) || {};
       try {
@@ -788,27 +828,20 @@ export class WebServer {
       const filterCategory = category && category !== 'ALL' ? category : undefined;
 
       if (q) {
-        let messages = this.store.search(q, {
+        // Every filter runs in SQL, so pages are full and `total` is the real match count
+        const { messages, total } = this.store.searchWithTotal(q, {
           accountId,
           folderId,
           limit,
           offset,
-          category: filterCategory
+          category: filterCategory,
+          isSeen,
+          isFlagged
         });
-        if (filterCategory) {
-          const catUpper = filterCategory.toUpperCase();
-          messages = messages.filter(m => (m.category || '').toUpperCase() === catUpper);
-        }
-        if (isSeen !== undefined) {
-          messages = messages.filter(m => Boolean(m.isSeen) === isSeen);
-        }
-        if (isFlagged !== undefined) {
-          messages = messages.filter(m => Boolean(m.isFlagged) === isFlagged);
-        }
         this._json(res, 200, {
           messages,
           count: messages.length,
-          total: messages.length,
+          total,
           query: q,
           category: category || 'ALL',
           limit,
@@ -847,10 +880,27 @@ export class WebServer {
       return;
     }
 
+    // Send an email (new message or reply)
+    if (method === 'POST' && pathname === '/api/messages/send') {
+      const body = await getBody();
+      if (body === null) return;
+      if (!body.accountId) {
+        this._json(res, 400, { error: 'Choose an account to send from', code: 'VALIDATION_ERROR' });
+        return;
+      }
+      try {
+        const result = await this.mailService.send(body);
+        this._json(res, 200, { success: true, ...result });
+      } catch (err) {
+        const status = err.statusCode || (err.message?.includes('Account not found') ? 404 : 502);
+        this._json(res, status, { error: err.message, code: err.code || (status === 502 ? 'SEND_FAILED' : 'VALIDATION_ERROR') });
+      }
+      return;
+    }
+
     const singleMsgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
     if (method === 'GET' && singleMsgMatch) {
-      const messageId = decodeURIComponent(singleMsgMatch[1]);
-      const msg = this.store.getMessage(messageId);
+      const msg = this.store.findMessage(decodeURIComponent(singleMsgMatch[1]));
       if (!msg) {
         this._json(res, 404, { error: 'Message not found' });
         return;
@@ -859,62 +909,93 @@ export class WebServer {
       return;
     }
 
+    // Delete: removed locally now, moved to Trash on the server in the background
     if (method === 'DELETE' && singleMsgMatch) {
       const messageId = decodeURIComponent(singleMsgMatch[1]);
+      const msg = this.store.findMessage(messageId);
+      if (!msg) {
+        this._json(res, 404, { success: false, error: 'Message not found', messageId });
+        return;
+      }
+      if (this.syncEngine?.deleteMessage) this.syncEngine.deleteMessage(msg);
+      else this.store.deleteMessage(msg.id);
+      this._json(res, 200, { success: true, messageId: msg.id });
+      return;
+    }
+
+    // Full body (text, sanitized HTML, attachment list); cached after the first open
+    const bodyMatch = pathname.match(/^\/api\/messages\/([^/]+)\/body$/);
+    if (method === 'GET' && bodyMatch) {
+      const msg = this.store.findMessage(decodeURIComponent(bodyMatch[1]));
+      if (!msg) {
+        this._json(res, 404, { error: 'Message not found' });
+        return;
+      }
       try {
-        const deleted = this.store.deleteMessage(messageId);
-        this._json(res, 200, { success: deleted, messageId });
+        const body = await this.mailService.getBody(msg, { refresh: url.searchParams.get('refresh') === 'true' });
+        this._json(res, 200, { messageId: msg.id, ...body });
       } catch (err) {
-        this._json(res, 400, { error: err.message });
+        this._json(res, err.statusCode || 502, { error: err.message, code: 'BODY_FETCH_FAILED' });
       }
       return;
     }
 
-    const readMatch = pathname.match(/^\/api\/messages\/([^/]+)\/read$/);
-    if (method === 'POST' && readMatch) {
-      const messageId = decodeURIComponent(readMatch[1]);
+    const attachmentMatch = pathname.match(/^\/api\/messages\/([^/]+)\/attachments\/(\d+)$/);
+    if (method === 'GET' && attachmentMatch) {
+      const msg = this.store.findMessage(decodeURIComponent(attachmentMatch[1]));
+      if (!msg) {
+        this._json(res, 404, { error: 'Message not found' });
+        return;
+      }
       try {
-        this.store.db.prepare("UPDATE messages SET is_seen = 1, updated_at = datetime('now') WHERE id = ? OR message_id = ?").run(messageId, messageId);
-        this._json(res, 200, { success: true, messageId, isSeen: true });
+        const att = await this.mailService.getAttachment(msg, Number(attachmentMatch[2]));
+        if (!att) {
+          this._json(res, 404, { error: 'Attachment not found' });
+          return;
+        }
+        const safeName = att.filename.replace(/[\r\n"\\]/g, '_');
+        res.writeHead(200, {
+          // Always download; never render untrusted attachment content on our origin
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': att.content.length,
+          'Content-Disposition': `attachment; filename="${safeName.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(att.filename)}`,
+          'Cache-Control': 'private, no-store'
+        });
+        res.end(att.content);
       } catch (err) {
-        this._json(res, 400, { error: err.message });
+        this._json(res, err.statusCode || 502, { error: err.message, code: 'ATTACHMENT_FETCH_FAILED' });
       }
       return;
     }
 
-    const unreadMatch = pathname.match(/^\/api\/messages\/([^/]+)\/unread$/);
-    if (method === 'POST' && unreadMatch) {
-      const messageId = decodeURIComponent(unreadMatch[1]);
-      try {
-        this.store.db.prepare("UPDATE messages SET is_seen = 0, updated_at = datetime('now') WHERE id = ? OR message_id = ?").run(messageId, messageId);
-        this._json(res, 200, { success: true, messageId, isSeen: false });
-      } catch (err) {
-        this._json(res, 400, { error: err.message });
+    // Read / unread / star / unstar: local change now, pushed to the server in the background
+    const stateMatch = pathname.match(/^\/api\/messages\/([^/]+)\/(read|unread|star|flag|unstar|unflag)$/);
+    if (method === 'POST' && stateMatch) {
+      const messageId = decodeURIComponent(stateMatch[1]);
+      const action = stateMatch[2];
+      const msg = this.store.findMessage(messageId);
+      if (!msg) {
+        this._json(res, 404, { success: false, error: 'Message not found', messageId });
+        return;
       }
-      return;
-    }
-
-    const starMatch = pathname.match(/^\/api\/messages\/([^/]+)\/(star|flag)$/);
-    if (method === 'POST' && starMatch) {
-      const messageId = decodeURIComponent(starMatch[1]);
-      try {
-        this.store.setMessageFlag(messageId, true);
-        this._json(res, 200, { success: true, messageId, isFlagged: true });
-      } catch (err) {
-        this._json(res, 400, { error: err.message });
+      const changes = {
+        read: { seen: true },
+        unread: { seen: false },
+        star: { flagged: true },
+        flag: { flagged: true },
+        unstar: { flagged: false },
+        unflag: { flagged: false }
+      }[action];
+      if (this.syncEngine?.setMessageState) {
+        this.syncEngine.setMessageState(msg, changes);
+      } else {
+        if (changes.seen !== undefined) this.store.setMessageSeen(msg.id, changes.seen);
+        if (changes.flagged !== undefined) this.store.setMessageFlag(msg.id, changes.flagged);
       }
-      return;
-    }
-
-    const unstarMatch = pathname.match(/^\/api\/messages\/([^/]+)\/(unstar|unflag)$/);
-    if (method === 'POST' && unstarMatch) {
-      const messageId = decodeURIComponent(unstarMatch[1]);
-      try {
-        this.store.setMessageFlag(messageId, false);
-        this._json(res, 200, { success: true, messageId, isFlagged: false });
-      } catch (err) {
-        this._json(res, 400, { error: err.message });
-      }
+      const payload = { success: true, messageId: msg.id };
+      if (changes.seen !== undefined) payload.isSeen = changes.seen;
+      if (changes.flagged !== undefined) payload.isFlagged = changes.flagged;
+      this._json(res, 200, payload);
       return;
     }
 

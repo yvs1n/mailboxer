@@ -3,7 +3,7 @@
  *
  * Coordinates RFC 3501 synchronization lifecycle across multi-provider email accounts.
  * Manages UIDVALIDITY invalidation, incremental delta UID fetching, flag reconciliation,
- * and remote deletion pruning with persistent SQLite backing.
+ * remote deletion pruning, and pushing local changes (read, star, delete) back to the server.
  *
  * @module sync/sync-engine
  */
@@ -13,6 +13,52 @@ import { ImapClient } from '../connection/imap-client.js';
 import { SqliteStore } from '../storage/sqlite-store.js';
 import { defaultAccountManager } from '../auth/account-manager.js';
 import { defaultClassifier } from '../triage/classifier.js';
+
+/** RFC 6154 special-use flags for folders that never belong in a unified inbox. */
+const SKIPPED_SPECIAL_USE = new Set(['\\all', '\\junk', '\\trash', '\\drafts', '\\sent', '\\flagged', '\\important']);
+
+/** Name fallbacks for servers that don't advertise special-use flags. */
+const SKIPPED_FOLDER_NAMES = new Set([
+  'trash', 'deleted', 'deleted items', 'deleted messages', 'bin',
+  'junk', 'junk email', 'junk e-mail', 'spam', 'bulk mail',
+  'drafts', 'draft', 'sent', 'sent items', 'sent messages', 'sent mail', 'outbox',
+  'all mail', 'starred', 'important',
+  'notes', 'conversation history', 'sync issues', 'conflicts', 'local failures', 'server failures'
+]);
+
+const TRASH_NAMES = ['trash', 'deleted items', 'deleted messages', 'bin', '[gmail]/trash', '[google mail]/trash'];
+
+const OP_RETRY_DELAYS_MS = [5000, 30000, 120000];
+const OP_MEMORY_MS = 10 * 60 * 1000;
+
+/**
+ * Decides whether a LIST entry is a regular mail folder worth syncing.
+ * @param {{path?: string, name?: string, flags?: string[]}} folder
+ * @returns {boolean}
+ */
+export function isSyncableFolder(folder) {
+  if (!folder || folder.selectable === false) return false;
+  const flags = (folder.flags || []).map(f => String(f).toLowerCase());
+  if (flags.some(f => SKIPPED_SPECIAL_USE.has(f) || f === '\\noselect' || f === '\\nonexistent')) return false;
+  const path = String(folder.path || folder.name || '');
+  if (path.toUpperCase() === 'INBOX') return true;
+  // Gmail system labels ([Gmail]/All Mail, [Gmail]/Spam, ...)
+  if (/^\[(gmail|google mail)\]/i.test(path)) return false;
+  const leaf = String(folder.name || path).toLowerCase();
+  return !SKIPPED_FOLDER_NAMES.has(leaf) && !SKIPPED_FOLDER_NAMES.has(path.toLowerCase());
+}
+
+/**
+ * Parses a folder selection setting: '*' (all regular folders) or a comma list.
+ * @param {string|string[]|undefined} value
+ * @returns {'*'|string[]}
+ */
+function parseFolderSelection(value) {
+  if (Array.isArray(value)) return value.length ? value : '*';
+  if (!value || String(value).trim() === '*') return '*';
+  const list = String(value).split(',').map(s => s.trim()).filter(Boolean);
+  return list.length ? list : '*';
+}
 
 /**
  * Synchronization Engine orchestrating background sync and local SQLite persistence.
@@ -27,6 +73,8 @@ export class SyncEngine extends EventEmitter {
    * @param {number} [options.batchSize=50] - Batch size for UID fetch
    * @param {number} [options.syncIntervalMs=60000] - Default periodic sync interval
    * @param {object} [options.classifier] - Triage classifier instance
+   * @param {string|string[]} [options.folders] - '*' (all regular folders, default) or folder paths
+   *   (default: MAILBOXER_SYNC_FOLDERS env)
    */
   constructor(options = {}) {
     super();
@@ -41,10 +89,28 @@ export class SyncEngine extends EventEmitter {
       ((config) => new ImapClient({ accountConfig: config, ...options.clientOptions }));
     this.batchSize = options.batchSize || 50;
     this.syncIntervalMs = options.syncIntervalMs || 60000;
+    this.folderSelection = parseFolderSelection(options.folders ?? process.env.MAILBOXER_SYNC_FOLDERS);
 
     this._isSyncing = new Map();
     this._periodicTimer = null;
     this.lastSyncAt = null;
+
+    /** accountId -> { lastSyncAt, lastError, lastErrorAt } */
+    this.accountStatus = new Map();
+
+    // UIDs fetched once but dropped by the date horizon: folderId -> Set<uid>.
+    // Prevents re-downloading the same old messages on every cycle.
+    this._skippedOldUids = new Map();
+
+    // Local changes being pushed to the server: folderId -> Map<uid, {pending, doneAt}>.
+    // Sync leaves these messages alone so they don't flip back mid-push.
+    this._localOps = new Map();
+
+    // Queued remote operations per account.
+    this._opQueues = new Map();
+    this._opRunners = new Set();
+    this._opTimers = new Set();
+    this._trashFolderCache = new Map();
   }
 
   /**
@@ -53,6 +119,18 @@ export class SyncEngine extends EventEmitter {
    */
   get isPeriodicSyncActive() {
     return this._periodicTimer !== null;
+  }
+
+  /**
+   * Sync state for one account (for the UI).
+   * @param {string} accountId
+   */
+  getAccountStatus(accountId) {
+    return this.accountStatus.get(accountId) || { lastSyncAt: null, lastError: null, lastErrorAt: null };
+  }
+
+  _setAccountStatus(accountId, patch) {
+    this.accountStatus.set(accountId, { ...this.getAccountStatus(accountId), ...patch });
   }
 
   /**
@@ -85,7 +163,9 @@ export class SyncEngine extends EventEmitter {
     }
 
     if (!accountConfig) {
-      throw new Error(`Account "${accountId}" not found in account manager or storage`);
+      const err = new Error(`Account "${accountId}" not found in account manager or storage`);
+      err.permanent = true;
+      throw err;
     }
 
     const client = this.createClient(accountConfig);
@@ -117,20 +197,63 @@ export class SyncEngine extends EventEmitter {
     }
   }
 
+  // ==========================================
+  // LOCAL CHANGE TRACKING
+  // ==========================================
+
+  /** Marks a message as having a local change in flight. Returns a finish callback. @private */
+  _beginLocalOp(folderId, uid) {
+    let folderOps = this._localOps.get(folderId);
+    if (!folderOps) {
+      folderOps = new Map();
+      this._localOps.set(folderId, folderOps);
+    }
+    const entry = folderOps.get(uid) || { pending: 0, doneAt: 0 };
+    entry.pending++;
+    folderOps.set(uid, entry);
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      entry.pending = Math.max(0, entry.pending - 1);
+      entry.doneAt = Date.now();
+    };
+  }
+
+  /**
+   * UIDs whose server snapshot may be stale: changes still pending, or pushed
+   * after `sinceTs` (i.e. after this sync read the server state).
+   * @private
+   */
+  _protectedUids(folderId, sinceTs) {
+    const folderOps = this._localOps.get(folderId);
+    const out = new Set();
+    if (!folderOps) return out;
+    const now = Date.now();
+    for (const [uid, entry] of folderOps) {
+      if (entry.pending > 0 || entry.doneAt >= sinceTs) {
+        out.add(uid);
+      } else if (now - entry.doneAt > OP_MEMORY_MS) {
+        folderOps.delete(uid);
+      }
+    }
+    return out;
+  }
+
   /**
    * Synchronizes a single IMAP folder / mailbox for an account.
    *
    * Lifecycle:
    * 1. Mailbox Selection: queries UIDVALIDITY, UIDNEXT, total messages.
    * 2. Cache Invalidation: if UIDVALIDITY changed, purges cached local messages.
-   * 3. Delta UID Fetch: queries UID <maxLocalUid + 1>:* and fetches missing messages.
-   * 4. Flag Reconciliation: updates local read/unread state using UID SEARCH UNSEEN.
+   * 3. Delta UID Fetch: new UIDs above the local maximum, plus any missing 2025+ messages.
+   * 4. Flag Reconciliation: read (UNSEEN) and starred (FLAGGED) state from the server.
    * 5. Deleted UID Pruning: purges messages removed from the remote mailbox.
    *
    * @param {string} accountId - Account ID
    * @param {string} folderName - Mailbox name (e.g. 'INBOX')
    * @param {object} [options={}] - Options
-   * @returns {Promise<object>} FolderSyncResult
+   * @returns {Promise<object>} FolderSyncResult (includes `messages`: newly stored records)
    */
   async syncFolder(accountId, folderName, options = {}) {
     if (!accountId || !folderName) {
@@ -146,6 +269,7 @@ export class SyncEngine extends EventEmitter {
     }
 
     this.emit('syncFolderStart', { accountId, folder: folderName, timestamp: new Date().toISOString() });
+    const startedAt = Date.now();
 
     try {
       // 1. SELECT Mailbox & inspect UIDVALIDITY / UIDNEXT
@@ -165,6 +289,8 @@ export class SyncEngine extends EventEmitter {
       ) {
         // UIDVALIDITY mismatch: server mailbox was rebuilt or UIDs reassigned
         this.store.clearFolder(folderId);
+        this._skippedOldUids.delete(folderId);
+        this._localOps.delete(folderId);
         flushed = true;
         this.emit('cacheInvalidated', {
           accountId,
@@ -174,14 +300,16 @@ export class SyncEngine extends EventEmitter {
         });
       }
 
+      const folderFlags = options.folderFlags || existingFolder?.flags || selectResult.flags || [];
+
       // Upsert folder metadata in SQLite
       this.store.upsertFolder({
         id: folderId,
         accountId,
-        name: folderName,
+        name: options.folderDisplayName || folderName,
         path: folderPath,
-        delimiter: existingFolder?.delimiter || '/',
-        flags: selectResult.flags || [],
+        delimiter: options.folderDelimiter || existingFolder?.delimiter || '/',
+        flags: folderFlags,
         uidvalidity: selectResult.uidValidity,
         uidnext: selectResult.uidNext,
         totalMessages: selectResult.exists || 0,
@@ -189,47 +317,46 @@ export class SyncEngine extends EventEmitter {
         syncStatus: 'SYNCING'
       });
 
-      // 3. Delta UID Fetch (Restricted to 2025 onwards for fresh inbox)
+      // 3. Delta UID Fetch (restricted to 2025 onwards for a fresh inbox)
       const sinceCriteria = options.since || process.env.MAILBOXER_SYNC_SINCE || 'SINCE 1-Jan-2025';
       const minDateStr = options.minDate || process.env.MAILBOXER_MIN_DATE || '2025-01-01T00:00:00.000Z';
       const minTimestamp = new Date(minDateStr).getTime();
 
+      // One date-bounded search serves backfill and deletion pruning.
+      let remoteUids;
+      try {
+        remoteUids = await client.searchUids(sinceCriteria);
+      } catch {
+        remoteUids = await client.searchUids('ALL');
+      }
+
       const maxLocalUid = this.store.getMaxUid(folderId);
+      const isInitialSync = maxLocalUid === null || maxLocalUid === 0;
+      const skippedOld = this._skippedOldUids.get(folderId) || new Set();
+      const protectedUids = this._protectedUids(folderId, startedAt);
       let uidsToFetch = [];
 
-      if (maxLocalUid === null || maxLocalUid === 0) {
-        // Initial sync: fetch fresh UIDs from 2025 onwards
-        let freshUids = [];
-        try {
-          freshUids = await client.searchUids(sinceCriteria);
-        } catch {
-          freshUids = await client.searchUids('ALL');
-        }
-        uidsToFetch = options.initialLimit ? freshUids.slice(-options.initialLimit) : freshUids;
+      if (isInitialSync) {
+        const fresh = remoteUids.filter(u => !skippedOld.has(u));
+        uidsToFetch = options.initialLimit ? fresh.slice(-options.initialLimit) : fresh;
       } else {
-        // Incremental sync & Historical Backfill:
-        const rangeCriteria = `UID ${maxLocalUid + 1}:*`;
-        const candidateUids = await client.searchUids(rangeCriteria);
-        // Exclude any UID <= maxLocalUid (RFC 3501 quirk fallback)
-        const newUids = candidateUids.filter(u => u > maxLocalUid);
+        // New arrivals above the local maximum (catches mail with old INTERNALDATE too)
+        const candidateUids = await client.searchUids(`UID ${maxLocalUid + 1}:*`);
+        // Exclude any UID <= maxLocalUid (RFC 3501: "n:*" always returns the highest UID)
+        const newUids = candidateUids.filter(u => u > maxLocalUid && !skippedOld.has(u));
+        const newSet = new Set(newUids);
 
-        // Also backfill any missing historical messages from 2025 onwards
-        let missingUids = [];
-        if (this.store.getFolderUids) {
-          let allRemoteUids = [];
-          try {
-            allRemoteUids = await client.searchUids(sinceCriteria);
-          } catch {
-            allRemoteUids = await client.searchUids('ALL');
-          }
-          const localUids = new Set(this.store.getFolderUids(folderId));
-          missingUids = allRemoteUids.filter(u => !localUids.has(u) && !newUids.includes(u));
-        }
+        // Backfill missing 2025+ messages, newest first
+        const localUids = new Set(this.store.getFolderUids(folderId));
+        const missingUids = remoteUids
+          .filter(u => !localUids.has(u) && !newSet.has(u) && !skippedOld.has(u) && !protectedUids.has(u))
+          .sort((a, b) => b - a);
 
         uidsToFetch = [...newUids, ...missingUids];
       }
 
       let fetchedCount = 0;
+      const storedRecords = [];
       if (uidsToFetch.length > 0) {
         const batchSize = options.batchSize || this.batchSize || 50;
         for (let i = 0; i < uidsToFetch.length; i += batchSize) {
@@ -237,15 +364,20 @@ export class SyncEngine extends EventEmitter {
           const range = chunk.join(',');
           const fetchedMessages = await client.fetchMessages(range);
 
-          // Strictly filter out messages older than 2025
-          const freshMessages = fetchedMessages.filter(m => {
-            if (!m.date) return true;
-            const t = new Date(m.date).getTime();
-            return isNaN(t) || t >= minTimestamp;
-          });
+          // Strictly filter out messages older than the date horizon, and remember
+          // them so they are not downloaded again next cycle.
+          const freshMessages = [];
+          for (const m of fetchedMessages) {
+            const t = m.date ? new Date(m.date).getTime() : NaN;
+            if (!m.date || isNaN(t) || t >= minTimestamp) {
+              freshMessages.push(m);
+            } else {
+              skippedOld.add(m.uid);
+            }
+          }
 
           const records = freshMessages.map(m => {
-            let triage = { category: 'NORMAL', score: 50, isNoise: false, reason: null };
+            let triage = { category: 'NORMAL', score: 50, isNoise: false, reason: null, shouldNotify: false };
             if (this.classifier?.classify) {
               triage = this.classifier.classify(m);
             }
@@ -269,36 +401,47 @@ export class SyncEngine extends EventEmitter {
               triageCategory: triage.category || 'NORMAL',
               triageScore: triage.score ?? 50,
               isNoise: triage.isNoise ? 1 : 0,
-              triageReason: triage.reason || null
+              triageReason: triage.reason || null,
+              shouldNotify: Boolean(triage.shouldNotify),
+              // Genuinely new arrival (not first sync, not historical backfill)
+              isNew: !isInitialSync && m.uid > maxLocalUid
             };
           });
 
-          this.store.upsertMessages(records);
+          const ids = this.store.upsertMessages(records);
+          records.forEach((rec, idx) => { rec.id = ids[idx]; });
           fetchedCount += records.length;
+          storedRecords.push(...records);
 
           for (const rec of records) {
             this.emit('messageAdded', rec);
           }
         }
       }
+      if (skippedOld.size > 0) this._skippedOldUids.set(folderId, skippedOld);
 
-      // 4. Flag Reconciliation via UID SEARCH UNSEEN
+      // 4. Flag Reconciliation. Messages with local changes in flight are left alone.
       const unseenUids = await client.searchUids('UNSEEN');
-      this.store.reconcileSeenFlags(folderId, unseenUids);
+      this.store.reconcileSeenFlags(folderId, unseenUids, this._protectedUids(folderId, startedAt));
+
+      let flaggedUids = null;
+      try {
+        flaggedUids = await client.searchUids('FLAGGED');
+      } catch {
+        flaggedUids = null; // server refused; keep local starred state
+      }
+      if (flaggedUids && this.store.reconcileFlaggedFlags) {
+        this.store.reconcileFlaggedFlags(folderId, flaggedUids, this._protectedUids(folderId, startedAt));
+      }
+
       this.emit('flagsReconciled', {
         accountId,
         folder: folderName,
         unseenCount: unseenUids.length
       });
 
-      // 5. Remote Deletion Pruning via UID SEARCH (matching sinceCriteria)
-      let allRemoteUids = [];
-      try {
-        allRemoteUids = await client.searchUids(sinceCriteria);
-      } catch {
-        allRemoteUids = await client.searchUids('ALL');
-      }
-      const prunedCount = this.store.pruneDeletedUids(folderId, allRemoteUids);
+      // 5. Remote Deletion Pruning (same date-bounded set as backfill)
+      const prunedCount = this.store.pruneDeletedUids(folderId, remoteUids, this._protectedUids(folderId, startedAt));
       if (prunedCount > 0) {
         this.emit('messagesPruned', {
           accountId,
@@ -311,8 +454,10 @@ export class SyncEngine extends EventEmitter {
       this.store.upsertFolder({
         id: folderId,
         accountId,
-        name: folderName,
+        name: options.folderDisplayName || folderName,
         path: folderPath,
+        delimiter: options.folderDelimiter || existingFolder?.delimiter || '/',
+        flags: folderFlags,
         uidvalidity: selectResult.uidValidity,
         uidnext: selectResult.uidNext,
         totalMessages: selectResult.exists || 0,
@@ -328,6 +473,7 @@ export class SyncEngine extends EventEmitter {
         folderId,
         flushed,
         newMessagesCount: fetchedCount,
+        messages: storedRecords,
         prunedCount,
         uidValidity: selectResult.uidValidity,
         uidNext: selectResult.uidNext,
@@ -340,15 +486,17 @@ export class SyncEngine extends EventEmitter {
       return folderSyncResult;
     } catch (err) {
       const folderId = `${accountId}:${folderName}`;
-      this.store.upsertFolder({
-        id: folderId,
-        accountId,
-        name: folderName,
-        path: folderName,
-        syncStatus: 'ERROR',
-        syncError: err.message || String(err),
-        lastSyncedAt: new Date().toISOString()
-      });
+      try {
+        this.store.upsertFolder({
+          id: folderId,
+          accountId,
+          name: folderName,
+          path: folderName,
+          syncStatus: 'ERROR',
+          syncError: err.message || String(err),
+          lastSyncedAt: new Date().toISOString()
+        });
+      } catch {}
       throw err;
     } finally {
       if (ownsClient) {
@@ -362,10 +510,28 @@ export class SyncEngine extends EventEmitter {
   }
 
   /**
-   * Performs an incremental sync of all selectable folders for an account.
+   * Picks which of the server's folders to sync.
+   * @private
+   */
+  _selectFolders(folders, selection = this.folderSelection) {
+    if (selection === '*') {
+      const chosen = folders.filter(isSyncableFolder);
+      return chosen.length > 0 ? chosen : [{ name: 'INBOX', path: 'INBOX', flags: [] }];
+    }
+    const wanted = new Set(selection.map(s => s.toLowerCase()));
+    const chosen = folders.filter(f => f.selectable !== false && wanted.has(String(f.path || f.name).toLowerCase()));
+    // INBOX is always selectable even when LIST failed or omitted it
+    if (chosen.length === 0 && wanted.has('inbox')) {
+      return [{ name: 'INBOX', path: 'INBOX', flags: [] }];
+    }
+    return chosen;
+  }
+
+  /**
+   * Performs an incremental sync of the selected folders for an account.
    *
    * @param {string} accountId - Account identifier
-   * @param {object} [options={}] - Sync options
+   * @param {object} [options={}] - Sync options (`folders` overrides the engine's selection)
    * @returns {Promise<object>} AccountSyncResult
    */
   async syncAccount(accountId, options = {}) {
@@ -395,24 +561,36 @@ export class SyncEngine extends EventEmitter {
 
       // Folder discovery
       let folders = [];
+      let listed = false;
       try {
         folders = await client.listMailboxes('', '*');
+        listed = true;
       } catch {
         folders = [];
       }
 
-      // Filter selectable folders or default to INBOX
-      let selectableFolders = folders.filter(f => f.selectable !== false);
-      if (selectableFolders.length === 0) {
-        selectableFolders = [{ name: 'INBOX', path: 'INBOX' }];
+      const selection = options.folders !== undefined ? parseFolderSelection(options.folders) : this.folderSelection;
+      const selectedFolders = this._selectFolders(folders, selection);
+
+      // Drop cached folders we no longer sync (e.g. Spam/Trash from older versions)
+      if (listed && this.store.getFolders) {
+        const keep = new Set(selectedFolders.map(f => f.path || f.name));
+        for (const local of this.store.getFolders(accountId)) {
+          if (!keep.has(local.path)) {
+            this.store.deleteFolder(local.id);
+            this._skippedOldUids.delete(local.id);
+          }
+        }
       }
 
-      for (const folder of selectableFolders) {
+      for (const folder of selectedFolders) {
         const folderName = folder.path || folder.name;
         try {
           const res = await this.syncFolder(accountId, folderName, {
             ...options,
-            client
+            client,
+            folderFlags: folder.flags,
+            folderDelimiter: folder.delimiter || undefined
           });
           folderResults.push(res);
         } catch (fErr) {
@@ -432,6 +610,13 @@ export class SyncEngine extends EventEmitter {
       this.lastSyncAt = new Date().toISOString();
       const totalNew = folderResults.reduce((acc, r) => acc + (r.newMessagesCount || 0), 0);
       const totalPruned = folderResults.reduce((acc, r) => acc + (r.prunedCount || 0), 0);
+      const folderErrors = folderResults.filter(r => r.error);
+
+      this._setAccountStatus(accountId, {
+        lastSyncAt: this.lastSyncAt,
+        lastError: folderErrors.length ? `${folderErrors[0].folder}: ${folderErrors[0].error}` : null,
+        lastErrorAt: folderErrors.length ? this.lastSyncAt : null
+      });
 
       const syncResult = {
         accountId,
@@ -446,6 +631,10 @@ export class SyncEngine extends EventEmitter {
       this.emit('syncComplete', syncResult);
       return syncResult;
     } catch (err) {
+      this._setAccountStatus(accountId, {
+        lastError: err.message || String(err),
+        lastErrorAt: new Date().toISOString()
+      });
       this.emit('syncError', { accountId, error: err });
       if (options.throwOnError !== false) {
         throw err;
@@ -495,11 +684,15 @@ export class SyncEngine extends EventEmitter {
         for (const acc of accounts) {
           const id = acc.id || acc.email;
           if (id) {
-            await this.syncAccount(id, { throwOnError: false }).catch(() => {});
+            const result = await this.syncAccount(id, { throwOnError: false }).catch(() => null);
+            if (result && result.success === false) {
+              console.error(`[Mailboxer] Sync failed for ${id}: ${result.error}`);
+            }
           }
         }
       } catch (err) {
-        this.emit('error', err);
+        if (this.listenerCount('error') > 0) this.emit('error', err);
+        else console.error('[Mailboxer] Periodic sync cycle failed:', err.message || err);
       }
     };
 
@@ -510,12 +703,208 @@ export class SyncEngine extends EventEmitter {
   }
 
   /**
-   * Stops periodic background synchronization.
+   * Stops periodic background synchronization and pending retries.
    */
   stopPeriodicSync() {
     if (this._periodicTimer) {
       clearInterval(this._periodicTimer);
       this._periodicTimer = null;
+    }
+    for (const t of this._opTimers) clearTimeout(t);
+    this._opTimers.clear();
+  }
+
+  // ==========================================
+  // PUSHING LOCAL CHANGES TO THE SERVER
+  // ==========================================
+
+  /** Resolves the IMAP folder path for a stored message. @private */
+  _folderPathFor(message) {
+    const folderId = message.folderId || message.folder_id;
+    const accountId = message.accountId || message.account_id;
+    const folder = this.store.getFolderById?.(folderId);
+    if (folder?.path) return folder.path;
+    if (folderId && accountId && folderId.startsWith(`${accountId}:`)) return folderId.slice(accountId.length + 1);
+    return 'INBOX';
+  }
+
+  /**
+   * Marks a message read/unread and/or starred/unstarred. The local copy changes
+   * immediately; the server is updated in the background (with retries).
+   *
+   * @param {object} message - Stored message record
+   * @param {{seen?: boolean, flagged?: boolean}} changes
+   */
+  setMessageState(message, changes = {}) {
+    if (!message) return;
+    if (changes.seen !== undefined) this.store.setMessageSeen(message.id, changes.seen);
+    if (changes.flagged !== undefined) this.store.setMessageFlag(message.id, changes.flagged);
+    this._enqueueOp(message, { type: 'flags', ...changes });
+  }
+
+  /**
+   * Deletes a message: removed locally now, moved to Trash (or expunged) on the server
+   * in the background.
+   *
+   * @param {object} message - Stored message record
+   */
+  deleteMessage(message) {
+    if (!message) return;
+    this.store.deleteMessage(message.id);
+    this._enqueueOp(message, { type: 'delete' });
+  }
+
+  /** @private */
+  _enqueueOp(message, op) {
+    const accountId = message.accountId || message.account_id;
+    const folderId = message.folderId || message.folder_id;
+    const uid = Number(message.uid);
+    if (!accountId || !folderId || !Number.isFinite(uid)) return;
+
+    const entry = {
+      ...op,
+      accountId,
+      folderId,
+      folderPath: this._folderPathFor(message),
+      uid,
+      attempts: 0,
+      finish: this._beginLocalOp(folderId, uid)
+    };
+
+    const queue = this._opQueues.get(accountId) || [];
+    queue.push(entry);
+    this._opQueues.set(accountId, queue);
+    this._runOps(accountId);
+  }
+
+  /**
+   * Resolves (and caches) the account's Trash folder path.
+   * @private
+   */
+  async _findTrashFolder(client, accountId) {
+    if (this._trashFolderCache.has(accountId)) return this._trashFolderCache.get(accountId);
+    let trash = null;
+    try {
+      const folders = await client.listMailboxes('', '*');
+      const byFlag = folders.find(f => (f.flags || []).some(fl => String(fl).toLowerCase() === '\\trash'));
+      const byName = folders.find(f => TRASH_NAMES.includes(String(f.path || '').toLowerCase()) || TRASH_NAMES.includes(String(f.name || '').toLowerCase()));
+      trash = (byFlag || byName)?.path || null;
+    } catch {}
+    this._trashFolderCache.set(accountId, trash);
+    return trash;
+  }
+
+  /** Applies one queued operation on an open, authenticated client. @private */
+  async _applyOp(client, op, selected) {
+    if (selected.path !== op.folderPath) {
+      await client.selectMailbox(op.folderPath);
+      selected.path = op.folderPath;
+    }
+    if (op.type === 'flags') {
+      if (op.seen !== undefined) {
+        await client.storeFlags(op.uid, ['\\Seen'], op.seen ? '+FLAGS' : '-FLAGS');
+      }
+      if (op.flagged !== undefined) {
+        await client.storeFlags(op.uid, ['\\Flagged'], op.flagged ? '+FLAGS' : '-FLAGS');
+      }
+    } else if (op.type === 'delete') {
+      const trash = await this._findTrashFolder(client, op.accountId);
+      if (trash && trash !== op.folderPath) {
+        await client.moveMessages(op.uid, trash);
+      } else {
+        await client.deleteMessages(op.uid);
+      }
+    }
+  }
+
+  /** Drains an account's operation queue over a single connection. @private */
+  async _runOps(accountId) {
+    if (this._opRunners.has(accountId)) return;
+    this._opRunners.add(accountId);
+    try {
+      while ((this._opQueues.get(accountId) || []).length > 0) {
+        const batch = this._opQueues.get(accountId);
+        this._opQueues.set(accountId, []);
+
+        let client = null;
+        try {
+          client = await this._getAuthenticatedClient(accountId);
+        } catch (err) {
+          for (const op of batch) this._retryOrDrop(op, err);
+          continue;
+        }
+
+        const selected = { path: null };
+        try {
+          for (let i = 0; i < batch.length; i++) {
+            const op = batch[i];
+            try {
+              await this._applyOp(client, op, selected);
+              op.finish();
+              this.emit('remoteOpApplied', { accountId, type: op.type, uid: op.uid, folder: op.folderPath });
+            } catch (err) {
+              this._retryOrDrop(op, err);
+              if (!client.isAuthenticated) {
+                // Connection died: requeue the rest and reconnect on the next pass.
+                for (const rest of batch.slice(i + 1)) this._retryOrDrop(rest, err);
+                break;
+              }
+            }
+          }
+        } finally {
+          try { await client.logout(); } catch { client.destroy?.(); }
+        }
+      }
+    } finally {
+      this._opRunners.delete(accountId);
+    }
+  }
+
+  /** @private */
+  _retryOrDrop(op, err) {
+    const delay = OP_RETRY_DELAYS_MS[op.attempts];
+    op.attempts++;
+    if (!err?.permanent && delay !== undefined) {
+      const timer = setTimeout(() => {
+        this._opTimers.delete(timer);
+        const queue = this._opQueues.get(op.accountId) || [];
+        queue.push(op);
+        this._opQueues.set(op.accountId, queue);
+        this._runOps(op.accountId);
+      }, delay);
+      timer.unref?.();
+      this._opTimers.add(timer);
+      return;
+    }
+    // Give up: next sync restores the server's state for this message.
+    op.finish();
+    const message = `Could not ${op.type === 'delete' ? 'delete' : 'update'} message on server: ${err?.message || err}`;
+    this._setAccountStatus(op.accountId, { lastError: message, lastErrorAt: new Date().toISOString() });
+    this.emit('remoteOpFailed', { accountId: op.accountId, type: op.type, uid: op.uid, error: err });
+    if (!err?.permanent) console.error(`[Mailboxer] ${message}`);
+  }
+
+  /**
+   * Fetches, parses and caches the full body of a message from the server.
+   *
+   * @param {object} message - Stored message record
+   * @param {(raw: Buffer) => object} parse - MIME parser (raw -> {text, html, attachments, headers})
+   * @returns {Promise<{parsed: object, raw: Buffer}>}
+   */
+  async fetchFullMessage(message, parse) {
+    const accountId = message.accountId || message.account_id;
+    const client = await this._getAuthenticatedClient(accountId);
+    try {
+      await client.selectMailbox(this._folderPathFor(message), true);
+      const [result] = await client.fetchRawMessages(message.uid);
+      if (!result) {
+        const err = new Error('Message no longer exists on the server');
+        err.statusCode = 404;
+        throw err;
+      }
+      return { raw: result.raw, parsed: parse ? parse(result.raw) : null };
+    } finally {
+      try { await client.logout(); } catch { client.destroy?.(); }
     }
   }
 

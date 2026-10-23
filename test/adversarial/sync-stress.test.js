@@ -165,6 +165,11 @@ function createAdversarialServer(initialConfig = {}) {
             matchedUids = Array.from(folderMsgs.keys()).sort((a, b) => a - b);
           } else if (criteria === 'UNSEEN') {
             matchedUids = Array.from(state.unseenUids).filter(u => folderMsgs.has(u)).sort((a, b) => a - b);
+          } else if (criteria === 'FLAGGED') {
+            matchedUids = Array.from(folderMsgs.entries())
+              .filter(([, m]) => (m.flags || []).some(fl => String(fl).toLowerCase() === '\\flagged'))
+              .map(([u]) => u)
+              .sort((a, b) => a - b);
           } else if (criteria.startsWith('UID')) {
             const rangeStr = criteria.replace(/^UID\s+/, '').trim();
             if (rangeStr.endsWith(':*')) {

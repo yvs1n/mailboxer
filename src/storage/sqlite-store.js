@@ -681,6 +681,20 @@ export class SqliteStore {
   }
 
   /**
+   * Finds a message by row ID, falling back to its RFC Message-ID header.
+   *
+   * @param {string} idOrMessageId
+   * @returns {object|null}
+   */
+  findMessage(idOrMessageId) {
+    if (!idOrMessageId) return null;
+    const byId = this._stmtGetMessageById.get(idOrMessageId);
+    if (byId) return formatMessageRow(byId);
+    const byMessageId = this.db.prepare('SELECT * FROM messages WHERE message_id = ? LIMIT 1').get(idOrMessageId);
+    return formatMessageRow(byMessageId);
+  }
+
+  /**
    * Retrieves a message by folder ID and UID.
    *
    * @param {string} folderId - Folder ID
@@ -836,6 +850,68 @@ export class SqliteStore {
   }
 
   /**
+   * Sets or unsets the read (\Seen) status of a message.
+   *
+   * @param {string} messageId - Message row ID or RFC Message-ID
+   * @param {boolean} isSeen
+   * @returns {boolean}
+   */
+  setMessageSeen(messageId, isSeen) {
+    if (!messageId) return false;
+    this.db.prepare("UPDATE messages SET is_seen = ?, updated_at = datetime('now') WHERE id = ? OR message_id = ?").run(isSeen ? 1 : 0, messageId, messageId);
+    return true;
+  }
+
+  /**
+   * Returns the cached full body of a message, or null if not fetched yet.
+   *
+   * @param {string} messageId - Message row ID
+   * @returns {{text: string, html: string, attachments: object[], headers: object, fetchedAt: string}|null}
+   */
+  getMessageBody(messageId) {
+    if (!messageId) return null;
+    const row = this.db.prepare('SELECT * FROM message_bodies WHERE message_id = ?').get(messageId);
+    if (!row) return null;
+    let attachments = [];
+    let headers = {};
+    try { attachments = JSON.parse(row.attachments || '[]'); } catch {}
+    try { headers = JSON.parse(row.headers || '{}'); } catch {}
+    return {
+      text: row.text_body || '',
+      html: row.html_body || '',
+      attachments,
+      headers,
+      fetchedAt: row.fetched_at
+    };
+  }
+
+  /**
+   * Caches the parsed full body of a message.
+   *
+   * @param {string} messageId - Message row ID
+   * @param {{text?: string, html?: string, attachments?: object[], headers?: object}} body
+   */
+  saveMessageBody(messageId, body = {}) {
+    if (!messageId) return;
+    this.db.prepare(`
+      INSERT INTO message_bodies (message_id, text_body, html_body, attachments, headers, fetched_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(message_id) DO UPDATE SET
+        text_body = excluded.text_body,
+        html_body = excluded.html_body,
+        attachments = excluded.attachments,
+        headers = excluded.headers,
+        fetched_at = datetime('now')
+    `).run(
+      messageId,
+      body.text || '',
+      body.html || '',
+      JSON.stringify(body.attachments || []),
+      JSON.stringify(body.headers || {})
+    );
+  }
+
+  /**
    * Deletes a message by primary key or message_id.
    *
    * @param {string} messageId - Message ID
@@ -843,6 +919,7 @@ export class SqliteStore {
    */
   deleteMessage(messageId) {
     if (!messageId) return false;
+    // Search tokens and cached bodies are removed by ON DELETE CASCADE.
     this.db.prepare("DELETE FROM messages WHERE id = ? OR message_id = ?").run(messageId, messageId);
     return true;
   }
@@ -921,92 +998,75 @@ export class SqliteStore {
    * @returns {object[]} Matching messages ordered by date DESC
    */
   search(query, options = {}) {
-    if (!query || typeof query !== 'string') return [];
+    return this.searchWithTotal(query, options).messages;
+  }
+
+  /**
+   * Search with every filter applied in SQL, plus the total match count
+   * (so pagination and "N results" are accurate).
+   *
+   * Strategy: exact-token index first; if no message matches every token,
+   * fall back to a substring LIKE over subject, sender and snippet.
+   *
+   * @param {string} query
+   * @param {object} [options] - accountId, folderId, category, isSeen, isFlagged, limit, offset
+   * @returns {{ messages: object[], total: number }}
+   */
+  searchWithTotal(query, options = {}) {
+    const empty = { messages: [], total: 0 };
+    if (!query || typeof query !== 'string') return empty;
     const trimmed = query.trim();
-    if (!trimmed) return [];
+    if (!trimmed) return empty;
 
     const limit = Math.max(1, Number(options.limit || 50));
     const offset = Math.max(0, Number(options.offset || 0));
+
+    // Shared non-text filters
+    const filters = [];
+    const filterParams = [];
     const accountId = options.accountId || options.account_id;
     const folderId = options.folderId || options.folder_id;
-    const category = options.category;
+    if (accountId) { filters.push('m.account_id = ?'); filterParams.push(accountId); }
+    if (folderId) { filters.push('m.folder_id = ?'); filterParams.push(folderId); }
+    if (options.category && options.category !== 'ALL') {
+      filters.push('UPPER(m.category) = ?');
+      filterParams.push(String(options.category).toUpperCase());
+    }
+    const isSeen = options.isSeen ?? options.is_seen;
+    if (isSeen !== undefined) { filters.push('m.is_seen = ?'); filterParams.push(isSeen ? 1 : 0); }
+    const isFlagged = options.isFlagged ?? options.is_flagged;
+    if (isFlagged !== undefined) { filters.push('m.is_flagged = ?'); filterParams.push(isFlagged ? 1 : 0); }
 
+    const run = (textCondition, textParams) => {
+      const where = [textCondition, ...filters].join(' AND ');
+      const params = [...textParams, ...filterParams];
+      const rows = this.db.prepare(`SELECT m.* FROM messages m WHERE ${where} ORDER BY m.date DESC LIMIT ? OFFSET ?`)
+        .all(...params, limit, offset);
+      // A partial page tells us the total without a second query
+      let total;
+      if (rows.length < limit && (rows.length > 0 || offset === 0)) {
+        total = offset + rows.length;
+      } else {
+        total = Number(this.db.prepare(`SELECT COUNT(*) AS c FROM messages m WHERE ${where}`).get(...params)?.c || 0);
+      }
+      return { messages: rows.map(formatMessageRow), total };
+    };
+
+    // Strategy 1: inverted token index (every token must match)
     const tokens = tokenize(trimmed);
-
-    // Strategy 1: Inverted token index table (fastest for single and multi-word searches)
     if (tokens.length > 0) {
-      const intersectParts = [];
-      const tokenParams = [];
-
-      for (const tok of tokens) {
-        // Support exact token or prefix wildcard token
-        intersectParts.push('SELECT message_id FROM message_search_index WHERE token = ?');
-        tokenParams.push(tok);
-      }
-
-      const intersectSql = intersectParts.join(' INTERSECT ');
-      const filterConditions = [`m.id IN (${intersectSql})`];
-      const params = [...tokenParams];
-
-      if (accountId) {
-        filterConditions.push('m.account_id = ?');
-        params.push(accountId);
-      }
-      if (folderId) {
-        filterConditions.push('m.folder_id = ?');
-        params.push(folderId);
-      }
-      if (category && category !== 'ALL') {
-        filterConditions.push('UPPER(m.category) = ?');
-        params.push(String(category).toUpperCase());
-      }
-
-      params.push(limit, offset);
-
-      const sql = `
-        SELECT m.* FROM messages m
-        WHERE ${filterConditions.join(' AND ')}
-        ORDER BY m.date DESC
-        LIMIT ? OFFSET ?
-      `;
-
-      const rows = this.db.prepare(sql).all(...params);
-      if (rows.length > 0) {
-        return rows.map(formatMessageRow);
-      }
+      const intersectSql = tokens.map(() => 'SELECT message_id FROM message_search_index WHERE token = ?').join(' INTERSECT ');
+      const result = run(`m.id IN (${intersectSql})`, tokens);
+      if (result.total > 0) return result;
     }
 
-    // Strategy 2: Indexed multi-field LIKE fallback (for substrings or rare tokens)
-    const likePattern = `%${trimmed.toLowerCase()}%`;
-    const filterConditions = [
-      '(LOWER(m.subject) LIKE ? OR LOWER(m.sender) LIKE ? OR LOWER(m.body_snippet) LIKE ?)'
-    ];
-    const params = [likePattern, likePattern, likePattern];
-
-    if (accountId) {
-      filterConditions.push('m.account_id = ?');
-      params.push(accountId);
-    }
-    if (folderId) {
-      filterConditions.push('m.folder_id = ?');
-      params.push(folderId);
-    }
-    if (category && category !== 'ALL') {
-      filterConditions.push('UPPER(m.category) = ?');
-      params.push(String(category).toUpperCase());
-    }
-
-    params.push(limit, offset);
-
-    const fallbackSql = `
-      SELECT m.* FROM messages m
-      WHERE ${filterConditions.join(' AND ')}
-      ORDER BY m.date DESC
-      LIMIT ? OFFSET ?
-    `;
-
-    const rows = this.db.prepare(fallbackSql).all(...params);
-    return rows.map(formatMessageRow);
+    // Strategy 2: substring match (escape LIKE wildcards in user input)
+    const escaped = trimmed.toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`);
+    const like = `%${escaped}%`;
+    return run(
+      "(LOWER(m.subject) LIKE ? ESCAPE '\\' OR LOWER(m.sender) LIKE ? ESCAPE '\\' OR LOWER(m.body_snippet) LIKE ? ESCAPE '\\')",
+      [like, like, like]
+    );
   }
 
   // ==========================================
@@ -1044,26 +1104,42 @@ export class SqliteStore {
    * @param {string} folderId - Folder ID
    * @param {number[]} unseenUids - Array of remote UIDs returned from UID SEARCH UNSEEN
    */
-  reconcileSeenFlags(folderId, unseenUids = []) {
+  reconcileSeenFlags(folderId, unseenUids = [], skipUids = []) {
     if (!folderId) return;
-
     const unseenSet = new Set(unseenUids.map(Number));
-    const allFolderMsgs = this.db.prepare('SELECT uid, is_seen FROM messages WHERE folder_id = ?').all(folderId);
+    this._reconcileBooleanColumn(folderId, 'is_seen', (uid) => (unseenSet.has(uid) ? 0 : 1), skipUids);
+  }
+
+  /**
+   * Reconciles starred (\Flagged) state across a folder.
+   * Messages in flaggedUids become is_flagged = 1, all others 0.
+   *
+   * @param {string} folderId
+   * @param {number[]} flaggedUids - UIDs returned by UID SEARCH FLAGGED
+   * @param {Iterable<number>} [skipUids] - UIDs with local changes still being pushed
+   */
+  reconcileFlaggedFlags(folderId, flaggedUids = [], skipUids = []) {
+    if (!folderId) return;
+    const flaggedSet = new Set(flaggedUids.map(Number));
+    this._reconcileBooleanColumn(folderId, 'is_flagged', (uid) => (flaggedSet.has(uid) ? 1 : 0), skipUids);
+  }
+
+  /** @private */
+  _reconcileBooleanColumn(folderId, column, expectedFor, skipUids = []) {
+    const skip = new Set(Array.from(skipUids, Number));
+    const rows = this.db.prepare(`SELECT uid, ${column} AS v FROM messages WHERE folder_id = ?`).all(folderId);
+    const update = this.db.prepare(`UPDATE messages SET ${column} = ?, updated_at = datetime('now') WHERE folder_id = ? AND uid = ?`);
 
     this.db.exec('BEGIN');
     try {
-      const updateSeenStmt = this.db.prepare(`
-        UPDATE messages SET is_seen = ?, updated_at = datetime('now') WHERE folder_id = ? AND uid = ?
-      `);
-
-      for (const row of allFolderMsgs) {
+      for (const row of rows) {
         const uid = Number(row.uid);
-        const shouldBeSeen = unseenSet.has(uid) ? 0 : 1;
-        if (Number(row.is_seen) !== shouldBeSeen) {
-          updateSeenStmt.run(shouldBeSeen, folderId, uid);
+        if (skip.has(uid)) continue;
+        const expected = expectedFor(uid);
+        if (Number(row.v) !== expected) {
+          update.run(expected, folderId, uid);
         }
       }
-
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
@@ -1078,13 +1154,14 @@ export class SqliteStore {
    * @param {number[]} activeUids - Array of remote UIDs returned from UID SEARCH ALL
    * @returns {number} Number of deleted messages
    */
-  pruneDeletedUids(folderId, activeUids = []) {
+  pruneDeletedUids(folderId, activeUids = [], skipUids = []) {
     if (!folderId) return 0;
 
     const activeSet = new Set(activeUids.map(Number));
+    const skip = new Set(Array.from(skipUids, Number));
     const localRows = this.db.prepare('SELECT id, uid FROM messages WHERE folder_id = ?').all(folderId);
 
-    const toDelete = localRows.filter(r => !activeSet.has(Number(r.uid)));
+    const toDelete = localRows.filter(r => !activeSet.has(Number(r.uid)) && !skip.has(Number(r.uid)));
     if (toDelete.length === 0) return 0;
 
     this.db.exec('BEGIN');

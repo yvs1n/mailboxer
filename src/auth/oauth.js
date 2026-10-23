@@ -55,7 +55,8 @@ export class OAuthManager {
         clientSecret: options.microsoftClientSecret || process.env.MICROSOFT_CLIENT_SECRET || ''
       }
     };
-    this.redirectBase = options.redirectBase || 'http://localhost:3000';
+    // Must match the public URL registered with Google / Microsoft (e.g. https://mail.example.com)
+    this.redirectBase = (options.redirectBase || process.env.APP_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');
     this._inFlightRefreshes = new Map();
     this._pendingStates = new Map();
   }

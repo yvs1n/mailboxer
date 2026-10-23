@@ -105,7 +105,17 @@ CREATE TABLE IF NOT EXISTS triage_rules (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- 6. Web Push Subscriptions Table
+-- 6. Full Message Bodies (fetched on demand when a message is opened)
+CREATE TABLE IF NOT EXISTS message_bodies (
+  message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  text_body TEXT,
+  html_body TEXT,
+  attachments TEXT DEFAULT '[]',
+  headers TEXT DEFAULT '{}',
+  fetched_at TEXT DEFAULT (datetime('now'))
+);
+
+-- 7. Web Push Subscriptions Table
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   id TEXT PRIMARY KEY,
   endpoint TEXT NOT NULL UNIQUE,
