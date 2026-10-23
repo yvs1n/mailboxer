@@ -89,7 +89,7 @@ export class WebServer {
       }
     } catch {}
     this.classifier = options.classifier || new Classifier({ store: this.store });
-    this.notificationManager = options.notificationManager || new NotificationManager({ store: this.store });
+    this.notificationManager = options.notificationManager || new NotificationManager({ store: this.store, appBaseUrl: process.env.APP_BASE_URL || undefined });
     this.syncEngine = options.syncEngine || new SyncEngine({
       store: this.store,
       accountManager: this.accountManager,

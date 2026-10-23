@@ -607,10 +607,15 @@ export class SyncEngine extends EventEmitter {
         }
       }
 
+      const folderErrors = folderResults.filter(r => r.error);
+      // Nothing synced at all (e.g. the connection dropped): that's an account failure
+      if (folderResults.length > 0 && folderErrors.length === folderResults.length) {
+        throw new Error(`${folderErrors[0].folder}: ${folderErrors[0].error}`);
+      }
+
       this.lastSyncAt = new Date().toISOString();
       const totalNew = folderResults.reduce((acc, r) => acc + (r.newMessagesCount || 0), 0);
       const totalPruned = folderResults.reduce((acc, r) => acc + (r.prunedCount || 0), 0);
-      const folderErrors = folderResults.filter(r => r.error);
 
       this._setAccountStatus(accountId, {
         lastSyncAt: this.lastSyncAt,

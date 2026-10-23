@@ -1,6 +1,6 @@
 /**
  * Milestone 5 Adversarial Stress & Empirical Challenge Suite
- * (test/adversarial/m5-challenger-stress.js)
+ * (test/adversarial/m5-challenger-stress.test.js)
  *
  * EMPIRICAL CHALLENGE TARGETS:
  * 1. Multi-account onboarding burst & race conditions (concurrent 5-account onboarding, deduplication, cross-instance locking).
@@ -660,7 +660,7 @@ describe('Milestone 5 Adversarial Challenge & Stress Suite', () => {
         return { status: 201, ok: true, text: async () => 'Created' };
       };
 
-      await conduit.send(
+      await conduit.sendToAll(
         { title: 'VIP Alert', body: 'Prof. Vance meeting at 3pm', category: 'VIP' },
         { fetch: mockFetch }
       );

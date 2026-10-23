@@ -103,11 +103,26 @@ export class CredentialVault {
           throw new Error(`Vault key file not found at ${this.keyFilePath}, but encrypted vault data exists at ${this.vaultFilePath}. Restoring or regenerating a key would cause data loss.`);
         }
 
-        // Clean initial setup: generate new 256-bit random key
+        // Clean initial setup: generate new 256-bit random key.
+        // 'wx' never overwrites: if another instance created the key first, use theirs.
         this._key = crypto.randomBytes(32);
         try {
-          await fs.writeFile(this.keyFilePath, this._key.toString('hex'), { mode: 0o600 });
+          await fs.writeFile(this.keyFilePath, this._key.toString('hex'), { mode: 0o600, flag: 'wx' });
         } catch (err) {
+          if (err.code === 'EEXIST') {
+            let existing = '';
+            for (let attempt = 0; attempt < 20; attempt++) {
+              existing = (await fs.readFile(this.keyFilePath, 'utf8')).trim();
+              if (existing.length === 64) break;
+              await new Promise(r => setTimeout(r, 10)); // the other writer is mid-write
+            }
+            if (!/^[0-9a-fA-F]{64}$/.test(existing)) {
+              throw new Error(`Corrupted vault key at ${this.keyFilePath}: expected 64-character hex string (32 bytes), received length ${existing.length}`);
+            }
+            this._key = Buffer.from(existing, 'hex');
+            this._initialized = true;
+            return;
+          }
           if (err.code === 'EACCES' || err.code === 'EPERM' || err.code === 'EROFS') {
             throw new Error(`Failed to create vault key: Permission denied on ${this.keyFilePath} (${err.code})`);
           }
