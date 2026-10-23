@@ -22,6 +22,7 @@ import { Classifier } from '../triage/classifier.js';
 import { NotificationManager } from '../notifications/manager.js';
 import { SyncEngine } from '../sync/sync-engine.js';
 import { IdleManager } from '../connection/idle-manager.js';
+import { AuthGuard, isCrossSiteRequest } from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,6 +49,7 @@ export class WebServer {
    * @param {Classifier} [options.classifier]
    * @param {SyncEngine} [options.syncEngine]
    * @param {IdleManager} [options.idleManager]
+   * @param {AuthGuard} [options.auth] - Login guard (default reads MAILBOXER_PASSWORD)
    */
   constructor(options = {}) {
     const parsedOptPort = options.port !== undefined && options.port !== null && options.port !== '' && !Number.isNaN(Number(options.port)) ? Number(options.port) : null;
@@ -63,6 +65,8 @@ export class WebServer {
     const defaultDbPath = options.dbPath || (this.accountManager?.vault?.dataDir
       ? path.join(this.accountManager.vault.dataDir, 'mailboxer.sqlite')
       : (process.env.SQLITE_PATH || path.resolve(this.dataDir, 'mailboxer.sqlite')));
+
+    this.auth = options.auth || new AuthGuard({ dataDir: this.dataDir });
 
     this.store = options.store || new SqliteStore(defaultDbPath);
     if (this.store && !this.accountManager.store) {
@@ -104,6 +108,12 @@ export class WebServer {
     }
 
     await this.accountManager.init();
+
+    if (this.auth.mode === 'locked') {
+      console.warn('[Mailboxer] MAILBOXER_PASSWORD is not set. The API is locked until you set it.');
+    } else if (this.auth.mode === 'disabled') {
+      console.warn('[Mailboxer] MAILBOXER_PASSWORD is not set. Login is disabled (development mode only).');
+    }
 
     this.server = http.createServer((req, res) => {
       this._handleRequest(req, res).catch((err) => {
@@ -176,14 +186,21 @@ export class WebServer {
     const pathname = url.pathname;
     const method = req.method.toUpperCase();
 
-    // CORS headers for local development
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    // The web client is served from this same origin, so no CORS headers are sent.
+    // Without them, browsers block other sites from reading API responses.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
 
     if (method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    // Block other websites from making state-changing calls with the user's cookie.
+    if (isCrossSiteRequest(req, this.auth.trustProxy)) {
+      this._json(res, 403, { error: 'Cross-site request blocked', code: 'CROSS_SITE_FORBIDDEN' });
       return;
     }
 
@@ -206,6 +223,57 @@ export class WebServer {
         return null;
       }
     };
+
+    // --- AUTH ENDPOINTS (public) ---
+    if (method === 'POST' && pathname === '/api/auth/login') {
+      const body = await getBody();
+      if (body === null) return;
+      const result = this.auth.login(req, body.password);
+      if (!result.ok) {
+        if (result.retryAfter) res.setHeader('Retry-After', String(result.retryAfter));
+        this._json(res, result.status, { error: result.error, code: result.code });
+        return;
+      }
+      if (result.cookie) res.setHeader('Set-Cookie', result.cookie);
+      this._json(res, 200, { success: true });
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/logout') {
+      res.setHeader('Set-Cookie', this.auth.clearCookie(req));
+      this._json(res, 200, { success: true });
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/api/auth/session') {
+      this._json(res, 200, {
+        authenticated: this.auth.isAuthenticated(req),
+        authRequired: this.auth.required,
+        configured: this.auth.mode !== 'locked'
+      });
+      return;
+    }
+
+    const isAuthenticated = this.auth.isAuthenticated(req);
+
+    // Public health check: only says the server is up. Details need a login.
+    if (method === 'GET' && pathname === '/health' && !isAuthenticated) {
+      this._json(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
+      return;
+    }
+
+    // Every other API route requires a login.
+    if (pathname.startsWith('/api/') && !isAuthenticated) {
+      if (this.auth.mode === 'locked') {
+        this._json(res, 503, {
+          error: 'Login is not configured. Set MAILBOXER_PASSWORD on the server.',
+          code: 'AUTH_NOT_CONFIGURED'
+        });
+        return;
+      }
+      this._json(res, 401, { error: 'Login required', code: 'UNAUTHORIZED' });
+      return;
+    }
 
     // --- REST API ENDPOINTS ---
 
@@ -963,7 +1031,7 @@ export class WebServer {
     } catch (e) {}
 
     if (window.opener) {
-      window.opener.postMessage(data, '*');
+      window.opener.postMessage(data, window.location.origin);
       setTimeout(() => window.close(), 1200);
     } else {
       setTimeout(() => window.close(), 3000);

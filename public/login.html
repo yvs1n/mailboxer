@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Sign in — Mailboxer</title>
+  <meta name="theme-color" content="#0b0d11">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    body.login-page {
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      margin: 0;
+      background: var(--bg-app);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      box-sizing: border-box;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 360px;
+      background: var(--bg-surface);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      padding: 28px 24px;
+      box-sizing: border-box;
+    }
+    .login-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .login-brand img { width: 28px; height: 28px; }
+    .login-brand h1 { font-size: 20px; margin: 0; font-weight: 650; }
+    .login-card label {
+      display: block;
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .login-card input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 11px 12px;
+      font-size: 16px;
+      color: var(--text-main);
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      outline: none;
+    }
+    .login-card input:focus { border-color: var(--border-focus); }
+    .login-card button {
+      width: 100%;
+      margin-top: 16px;
+      padding: 11px 12px;
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent-primary);
+      border: 0;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+    }
+    .login-card button:hover { background: var(--accent-primary-hover); }
+    .login-card button:disabled { opacity: 0.6; cursor: default; }
+    .login-error {
+      min-height: 18px;
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--accent-danger);
+    }
+  </style>
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="login-brand">
+      <img src="/icon.svg" alt="">
+      <h1>Mailboxer</h1>
+    </div>
+    <form id="login-form" autocomplete="on">
+      <input type="text" name="username" value="mailboxer" autocomplete="username" hidden>
+      <label for="login-password">Password</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button id="login-submit" type="submit">Sign in</button>
+      <div id="login-error" class="login-error" role="alert"></div>
+    </form>
+  </main>
+  <script>
+    (function () {
+      const form = document.getElementById('login-form');
+      const input = document.getElementById('login-password');
+      const button = document.getElementById('login-submit');
+      const errorEl = document.getElementById('login-error');
+
+      // Already signed in (or login disabled in dev): go straight to the app.
+      fetch('/api/auth/session').then(r => r.json()).then(s => {
+        if (s.authenticated) window.location.replace('/');
+        else if (s.configured === false) {
+          errorEl.textContent = 'Login is not set up. Set MAILBOXER_PASSWORD on the server.';
+          button.disabled = true;
+        }
+      }).catch(() => {});
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        errorEl.textContent = '';
+        button.disabled = true;
+        button.textContent = 'Signing in…';
+        try {
+          const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: input.value })
+          });
+          if (res.ok) {
+            window.location.replace('/');
+            return;
+          }
+          const data = await res.json().catch(() => ({}));
+          if (res.status === 429) {
+            const mins = Math.ceil(Number(res.headers.get('Retry-After') || 900) / 60);
+            errorEl.textContent = `Too many attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`;
+          } else {
+            errorEl.textContent = data.error || 'Sign in failed.';
+          }
+          input.select();
+        } catch {
+          errorEl.textContent = 'Could not reach the server.';
+        }
+        button.disabled = false;
+        button.textContent = 'Sign in';
+      });
+    })();
+  </script>
+</body>
+</html>

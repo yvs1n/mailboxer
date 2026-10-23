@@ -163,6 +163,22 @@ if (typeof globalThis !== 'undefined' && !globalThis.cleanMimeBody) {
   globalThis.cleanMimeBody = cleanMimeBody;
 }
 
+// Send the user to the login page whenever an API call says the session is missing or expired.
+if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const res = await nativeFetch(input, init);
+    if (res.status === 401) {
+      const url = typeof input === 'string' ? input : (input?.url || '');
+      const apiPath = url.startsWith('/') ? url : new URL(url, window.location.href).pathname;
+      if (apiPath.startsWith('/api/') && !apiPath.startsWith('/api/auth/')) {
+        window.location.replace('/login.html');
+      }
+    }
+    return res;
+  };
+}
+
 
 document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
@@ -302,6 +318,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   init();
+
+  // Sign out button: only shown when the server requires a login.
+  const btnLogout = document.getElementById('btn-logout');
+  fetch('/api/auth/session')
+    .then(r => r.json())
+    .then(s => { if (s.authRequired) btnLogout?.classList.remove('hidden'); })
+    .catch(() => {});
+  btnLogout?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {}
+    window.location.replace('/login.html');
+  });
 
   // Periodic Polling: Every 20 seconds stream fresh emails and refresh counts
   setInterval(() => {
@@ -1336,7 +1365,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   window.addEventListener('message', (event) => {
-    if (event.data?.type === 'MAILBOXER_OAUTH_RESULT') {
+    if (event.origin === window.location.origin && event.data?.type === 'MAILBOXER_OAUTH_RESULT') {
       if (event.data.success) {
         showToast('OAuth account connected successfully!', 'success');
         if (modalAddAccount) modalAddAccount.classList.add('hidden');

@@ -379,11 +379,11 @@ describe('Web Server & Gateway Integration (src/server/web-server.js)', () => {
     assert.strictEqual(formData.error, 'Code expired');
   });
 
-  it('sets application/json; charset=utf-8 on all JSON API endpoints and handles CORS preflight', async () => {
-    // CORS OPTIONS
+  it('sets application/json; charset=utf-8 on all JSON API endpoints and answers preflight without CORS headers', async () => {
+    // OPTIONS succeeds, but grants no cross-origin access (same-origin app only)
     const optRes = await fetch(`${baseUrl}/api/accounts`, { method: 'OPTIONS' });
     assert.strictEqual(optRes.status, 204);
-    assert.strictEqual(optRes.headers.get('access-control-allow-origin'), '*');
+    assert.strictEqual(optRes.headers.get('access-control-allow-origin'), null);
 
     // JSON GET
     const getRes = await fetch(`${baseUrl}/api/accounts`);
