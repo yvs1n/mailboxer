@@ -5,7 +5,7 @@
  * system tray icon badging, and deep-link navigation.
  */
 
-const CACHE_NAME = 'mailboxer-shell-v1';
+const CACHE_NAME = 'mailboxer-shell-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -114,6 +114,8 @@ self.addEventListener('notificationclick', (event) => {
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
       for (const client of windowClients) {
         if (client.url && 'focus' in client) {
+          // Tell the open app which message to show, then bring it forward
+          client.postMessage({ type: 'MAILBOXER_OPEN_URL', url: targetUrl });
           return client.focus();
         }
       }

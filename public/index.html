@@ -53,6 +53,13 @@
           </svg>
           <span>Connect Inbox</span>
         </button>
+        <button id="btn-compose" class="btn-compose-action" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 20h9"/>
+            <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>
+          </svg>
+          <span>Compose</span>
+        </button>
       </div>
 
       <!-- Navigation Sections -->
@@ -268,7 +275,7 @@
           <div class="reader-toolbar-actions">
             <button id="btn-reader-toggle-star" class="btn-action-tool" title="Star email">☆ Star</button>
             <button id="btn-reader-action-read" class="btn-action-tool" title="Toggle read/unread">Mark as Unread</button>
-            <a id="btn-reader-reply" class="btn-action-tool" href="#" target="_blank" rel="noopener">Reply ↗</a>
+            <button id="btn-reader-reply" class="btn-action-tool" type="button" title="Reply to sender">Reply</button>
             <button id="btn-reader-delete" class="btn-action-tool btn-tool-danger" title="Delete message">Delete</button>
           </div>
         </div>
@@ -298,7 +305,12 @@
 
         <!-- Email Body Content View -->
         <div class="reader-body-viewport">
+          <div id="reader-images-bar" class="reader-images-bar hidden">
+            <span>Remote images are hidden to protect your privacy.</span>
+            <button id="btn-reader-show-images" class="btn-ghost-sm" type="button">Show images</button>
+          </div>
           <div id="reader-view-body" class="reader-body-formatted"></div>
+          <div id="reader-attachments" class="reader-attachments hidden"></div>
         </div>
       </div>
     </section>
@@ -795,6 +807,43 @@
       <div class="reader-body-container">
         <div id="reader-body-content" class="reader-body-text"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Compose / Reply -->
+  <div id="modal-compose" class="modal-backdrop hidden">
+    <div class="modal-card modal-compose-card">
+      <div class="modal-header">
+        <h3 id="compose-title" class="modal-title">New Message</h3>
+        <button id="btn-close-compose" class="btn-close" type="button" title="Close">&times;</button>
+      </div>
+      <form id="form-compose" class="login-form compose-form" novalidate>
+        <div class="form-group">
+          <label for="compose-from">From</label>
+          <select id="compose-from" required></select>
+        </div>
+        <div class="form-group">
+          <label for="compose-to">To</label>
+          <input type="text" id="compose-to" placeholder="name@example.com, other@example.com" autocomplete="email" required>
+        </div>
+        <div class="form-group">
+          <label for="compose-cc">Cc</label>
+          <input type="text" id="compose-cc" placeholder="Optional">
+        </div>
+        <div class="form-group">
+          <label for="compose-subject">Subject</label>
+          <input type="text" id="compose-subject">
+        </div>
+        <div class="form-group">
+          <label for="compose-body">Message</label>
+          <textarea id="compose-body" rows="12"></textarea>
+        </div>
+        <div id="compose-error" class="form-error hidden"></div>
+        <button id="btn-send-compose" class="btn-submit" type="submit">
+          <span class="btn-text">Send</span>
+          <span class="btn-spinner hidden"></span>
+        </button>
+      </form>
     </div>
   </div>
 

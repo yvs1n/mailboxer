@@ -332,14 +332,37 @@ document.addEventListener('DOMContentLoaded', () => {
     window.location.replace('/login.html');
   });
 
-  // Periodic Polling: Every 20 seconds stream fresh emails and refresh counts
-  setInterval(() => {
-    loadMailboxSummary();
-    // Only refresh message feed if search is inactive
-    if (!currentSearchQuery) {
-      loadMessages({ silent: true });
+  // Background refresh: one request round at a time (no pile-up on slow
+  // networks), paused while the tab is hidden, and run right away on return.
+  const POLL_INTERVAL_MS = 20000;
+  let pollTimer = null;
+  let pollCount = 0;
+
+  async function pollOnce() {
+    pollTimer = null;
+    if (!document.hidden) {
+      pollCount++;
+      try {
+        const tasks = [loadMailboxSummary()];
+        // Only refresh message feed if search is inactive
+        if (!currentSearchQuery) tasks.push(loadMessages({ silent: true }));
+        // Account sync status changes slowly; check it every 3rd round
+        if (pollCount % 3 === 0) tasks.push(loadAccounts({ silent: true }));
+        await Promise.all(tasks);
+      } catch {}
     }
-  }, 20000);
+    schedulePoll();
+  }
+
+  function schedulePoll(delay = POLL_INTERVAL_MS) {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(pollOnce, delay);
+  }
+
+  schedulePoll();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) schedulePoll(0);
+  });
 
   // Manual Full Sync Trigger
   btnSyncAll?.addEventListener('click', triggerFullSync);
@@ -384,7 +407,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   // 2. ACCOUNT LIST & SIDEBAR SUB-LIST
   // ==========================================
-  async function loadAccounts() {
+  async function loadAccounts(options = {}) {
     try {
       const res = await fetch('/api/accounts');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -394,10 +417,12 @@ document.addEventListener('DOMContentLoaded', () => {
       renderSidebarAccounts(accountsList);
 
       // If user has zero accounts on first launch, open Add Account Modal automatically
-      if (accountsList.length === 0 && modalAddAccount) {
+      if (!options.silent && accountsList.length === 0 && modalAddAccount) {
         modalAddAccount.classList.remove('hidden');
       }
     } catch (err) {
+      // A background refresh keeps showing the last good list
+      if (options.silent) return;
       renderAccounts([]);
       renderSidebarAccounts([]);
     }
@@ -418,12 +443,14 @@ document.addEventListener('DOMContentLoaded', () => {
       const email = acc.email || acc.label || 'Account';
       const unreadCount = acc.inboxStatus?.unseen || acc.unreadCount || 0;
       const isActive = currentAccount === acc.id;
+      const rowTitle = acc.syncError ? `${email}\nSync problem: ${acc.syncError}` : email;
 
       return `
-        <button class="account-nav-row ${isActive ? 'active' : ''}" data-account-id="${escapeHtml(acc.id)}" title="${escapeHtml(email)}">
+        <button class="account-nav-row ${isActive ? 'active' : ''}" data-account-id="${escapeHtml(acc.id)}" title="${escapeHtml(rowTitle)}">
           <div class="acc-row-left">
             <span class="acc-provider-icon ${iconClass}">${initial}</span>
             <span class="acc-email-label">${escapeHtml(email)}</span>
+            ${acc.syncError ? '<span class="acc-sync-error" aria-label="Sync problem">⚠</span>' : ''}
           </div>
           ${unreadCount > 0 ? `<span class="nav-badge">${unreadCount}</span>` : ''}
         </button>
@@ -472,6 +499,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <span style="color:#10b981;font-size:11px;">🔒 Permanent Session</span>
                 ${unreadStatus}
               </div>
+              ${acc.syncError ? `<div class="account-sync-error-line">⚠ Last sync failed: ${escapeHtml(acc.syncError)}</div>` : ''}
             </div>
           </div>
           <div class="account-actions">
@@ -836,12 +864,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const acc = accountsList.find(a => a.id === msg.accountId);
     const accLabel = acc ? (acc.email || acc.provider) : 'Inbox';
 
-    // Body formatting with MIME cleaning & linkification
+    // Preview from the cached snippet; the full body loads right after
     const rawBody = msg.bodySnippet || msg.body || '(No message body content available)';
-    const cleanedBody = cleanMimeBody(rawBody);
-    const formattedBody = escapeHtml(cleanedBody)
-      .replace(/(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
-      .replace(/\n/g, '<br>');
+    const formattedBody = formatPlainText(cleanMimeBody(rawBody));
 
     // 1. Populate Desktop Reader Pane
     if (readerEmptyState) readerEmptyState.classList.add('hidden');
@@ -858,16 +883,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (readerViewSenderEmail) readerViewSenderEmail.textContent = senderEmailDisplay ? `<${senderEmailDisplay}>` : '';
     if (readerViewRecipient) readerViewRecipient.textContent = recipientText;
     if (readerViewTimestamp) readerViewTimestamp.textContent = fullDate;
-    if (readerViewBody) readerViewBody.innerHTML = formattedBody;
+    if (readerViewBody) {
+      readerViewBody.classList.remove('has-html');
+      readerViewBody.innerHTML = `${formattedBody}<div class="reader-loading-note">Loading full message…</div>`;
+    }
+    if (readerAttachments) {
+      readerAttachments.innerHTML = '';
+      readerAttachments.classList.add('hidden');
+    }
+    if (readerImagesBar) readerImagesBar.classList.add('hidden');
 
     updateReaderReadButtons(msg.isSeen);
     updateReaderStarButton(Boolean(msg.isFlagged));
-
-    // Wire mailto reply link
-    if (btnReaderReply) {
-      const replySubject = encodeURIComponent(`Re: ${msg.subject || ''}`);
-      btnReaderReply.href = `mailto:${encodeURIComponent(senderEmailDisplay || senderDisplay)}?subject=${replySubject}`;
-    }
 
     // 2. Populate Mobile / Modal Reader (for compatibility & narrow screens)
     if (readerCategoryBadge) {
@@ -885,11 +912,116 @@ document.addEventListener('DOMContentLoaded', () => {
       desktopReaderPane.classList.add('mobile-open');
     }
 
+    loadFullBody(msg);
+
     // Automatically mark read on open if unread
     if (!msg.isSeen) {
       markMessageRead(msg.id);
     }
   }
+
+  // ---- Full message body ----
+  const readerAttachments = document.getElementById('reader-attachments');
+  const readerImagesBar = document.getElementById('reader-images-bar');
+  const btnReaderShowImages = document.getElementById('btn-reader-show-images');
+  let activeReaderBody = null;
+  let readerLoadToken = 0;
+
+  function formatPlainText(text) {
+    return escapeHtml(text)
+      .replace(/(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/\n/g, '<br>');
+  }
+
+  function formatBytes(n) {
+    if (!Number.isFinite(n)) return '';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  async function loadFullBody(msg) {
+    const token = ++readerLoadToken;
+    activeReaderBody = null;
+    try {
+      const res = await fetch(`/api/messages/${encodeURIComponent(msg.id)}/body`);
+      const data = await res.json().catch(() => ({}));
+      if (token !== readerLoadToken) return; // another message was opened meanwhile
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      activeReaderBody = data;
+      renderFullBody(msg, data, { showImages: false });
+    } catch (err) {
+      if (token !== readerLoadToken) return;
+      readerViewBody?.querySelector('.reader-loading-note')?.replaceChildren(
+        document.createTextNode(`Could not load the full message (${err.message}). Showing the preview.`)
+      );
+    }
+  }
+
+  function buildEmailDocument(html, showImages) {
+    // The frame has no script permission; the CSP also blocks remote content
+    // (tracking pixels) until the user asks to show images.
+    const imgSrc = showImages ? 'data: https: http:' : 'data:';
+    return `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; font-src data:">
+<base target="_blank">
+<style>html{margin:0;padding:0;background:#fff;}body{margin:0;padding:12px;display:flow-root;color:#111;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;word-break:break-word;}img{max-width:100%;height:auto;}table{max-width:100%;}pre{white-space:pre-wrap;}</style>
+</head><body>${html}</body></html>`;
+  }
+
+  function renderFullBody(msg, body, { showImages }) {
+    const hasRemoteImages = /<img\b[^>]*\bsrc\s*=\s*["']?\s*https?:/i.test(body.html || '')
+      || /url\(\s*["']?https?:/i.test(body.html || '');
+
+    const targets = [readerViewBody, readerBodyContent].filter(Boolean);
+    for (const el of targets) {
+      if (body.html) {
+        el.classList.add('has-html');
+        el.innerHTML = '';
+        const frame = document.createElement('iframe');
+        frame.className = 'reader-html-frame';
+        frame.title = 'Email content';
+        frame.setAttribute('sandbox', 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.srcdoc = buildEmailDocument(body.html, showImages);
+        frame.addEventListener('load', () => {
+          try {
+            // Size the frame to its content (body height, not the frame's own scroll
+            // height, which never shrinks below the current frame size).
+            const doc = frame.contentDocument;
+            const fit = () => { frame.style.height = `${Math.max(120, Math.ceil(doc.body.getBoundingClientRect().height))}px`; };
+            fit();
+            if (typeof ResizeObserver !== 'undefined') new ResizeObserver(fit).observe(doc.body);
+            else doc.querySelectorAll('img').forEach(img => img.addEventListener('load', fit));
+          } catch {}
+        });
+        el.appendChild(frame);
+      } else {
+        el.classList.remove('has-html');
+        el.innerHTML = formatPlainText(body.text || cleanMimeBody(msg.bodySnippet || '') || '(No message body content available)');
+      }
+    }
+
+    if (readerImagesBar) readerImagesBar.classList.toggle('hidden', !(body.html && hasRemoteImages && !showImages));
+
+    const files = (body.attachments || []).filter(a => !a.inline || !body.html);
+    if (readerAttachments) {
+      readerAttachments.innerHTML = files.map(a => `
+        <a class="reader-attachment-chip" href="/api/messages/${encodeURIComponent(msg.id)}/attachments/${Number(a.index)}" download="${escapeHtml(a.filename)}" title="${escapeHtml(a.filename)}">
+          <span>📎</span>
+          <span class="att-name">${escapeHtml(a.filename)}</span>
+          <span class="att-size">${escapeHtml(formatBytes(a.size))}</span>
+        </a>
+      `).join('');
+      readerAttachments.classList.toggle('hidden', files.length === 0);
+    }
+  }
+
+  btnReaderShowImages?.addEventListener('click', () => {
+    if (activeReaderMessage && activeReaderBody) {
+      renderFullBody(activeReaderMessage, activeReaderBody, { showImages: true });
+    }
+  });
 
   function updateReaderReadButtons(isSeen) {
     const text = isSeen ? 'Mark as Unread' : 'Mark as Read';
@@ -908,50 +1040,94 @@ document.addEventListener('DOMContentLoaded', () => {
   btnReaderActionRead?.addEventListener('click', toggleActiveReaderReadState);
   btnReaderToggleRead?.addEventListener('click', toggleActiveReaderReadState);
 
+  /** POSTs a state change; resolves true on success, false (with a toast) on failure. */
+  async function postMessageAction(id, action) {
+    try {
+      const res = await fetch(`/api/messages/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+      if (res.ok) return true;
+      const data = await res.json().catch(() => ({}));
+      showToast(`Could not update the message: ${data.error || `HTTP ${res.status}`}`, 'error');
+    } catch (err) {
+      showToast(`Could not update the message: ${err.message}`, 'error');
+    }
+    return false;
+  }
+
+  /** Applies a read/unread change everywhere it is shown. */
+  function applySeenState(id, isSeen) {
+    const msg = currentMessagesMap.get(String(id));
+    if (msg) msg.isSeen = isSeen;
+    if (activeReaderMessage && String(activeReaderMessage.id) === String(id)) {
+      activeReaderMessage.isSeen = isSeen;
+      updateReaderReadButtons(isSeen);
+    }
+    updateCardSeenState(id, isSeen);
+  }
+
+  function applyStarState(id, isStarred) {
+    const msg = currentMessagesMap.get(String(id));
+    if (msg) msg.isFlagged = isStarred;
+    if (activeReaderMessage && String(activeReaderMessage.id) === String(id)) {
+      activeReaderMessage.isFlagged = isStarred;
+      updateReaderStarButton(isStarred);
+    }
+    updateCardStarState(id, isStarred);
+  }
+
+  async function setSeen(id, isSeen) {
+    applySeenState(id, isSeen);
+    const ok = await postMessageAction(id, isSeen ? 'read' : 'unread');
+    if (!ok) applySeenState(id, !isSeen);
+    loadMailboxSummary();
+    return ok;
+  }
+
+  async function setStarred(id, isStarred) {
+    applyStarState(id, isStarred);
+    const ok = await postMessageAction(id, isStarred ? 'star' : 'unstar');
+    if (!ok) applyStarState(id, !isStarred);
+    return ok;
+  }
+
   async function toggleActiveReaderReadState() {
     if (!activeReaderMessage) return;
-    const isCurrentlySeen = activeReaderMessage.isSeen;
-    const endpoint = isCurrentlySeen ? 'unread' : 'read';
-
-    try {
-      const res = await fetch(`/api/messages/${encodeURIComponent(activeReaderMessage.id)}/${endpoint}`, { method: 'POST' });
-      if (res.ok) {
-        activeReaderMessage.isSeen = !isCurrentlySeen;
-        updateReaderReadButtons(activeReaderMessage.isSeen);
-        updateCardSeenState(activeReaderMessage.id, activeReaderMessage.isSeen);
-        loadMailboxSummary();
-      }
-    } catch {}
+    await setSeen(activeReaderMessage.id, !activeReaderMessage.isSeen);
   }
 
   btnReaderToggleStar?.addEventListener('click', async () => {
     if (!activeReaderMessage) return;
-    const isCurrentlyStarred = Boolean(activeReaderMessage.isFlagged);
-    const endpoint = isCurrentlyStarred ? 'unstar' : 'star';
-
-    try {
-      const res = await fetch(`/api/messages/${encodeURIComponent(activeReaderMessage.id)}/${endpoint}`, { method: 'POST' });
-      if (res.ok) {
-        activeReaderMessage.isFlagged = !isCurrentlyStarred;
-        updateReaderStarButton(activeReaderMessage.isFlagged);
-        updateCardStarState(activeReaderMessage.id, activeReaderMessage.isFlagged);
-      }
-    } catch {}
+    await setStarred(activeReaderMessage.id, !activeReaderMessage.isFlagged);
   });
 
   btnReaderDelete?.addEventListener('click', async () => {
     if (!activeReaderMessage) return;
-    if (!confirm('Are you sure you want to delete this message?')) return;
-    const id = activeReaderMessage.id;
+    if (!confirm('Move this message to Trash?')) return;
+    const msg = activeReaderMessage;
+    const id = String(msg.id);
+
+    // Remove from view now; put it back if the server refuses
+    const card = document.getElementById(`msg-${id}`);
+    const placeholder = card ? document.createComment('deleted') : null;
+    if (card) card.replaceWith(placeholder);
+    currentMessagesMap.delete(id);
+    allLoadedMessages = allLoadedMessages.filter(m => String(m.id) !== id);
+    closeEmailReader();
+
     try {
       const res = await fetch(`/api/messages/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      if (res.ok) {
-        showToast('Message deleted', 'success');
-        closeEmailReader();
-        loadMessages();
-        loadMailboxSummary();
+      if (!res.ok && res.status !== 404) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
       }
-    } catch {}
+      totalAvailableMessages = Math.max(0, totalAvailableMessages - 1);
+      showToast('Moved to Trash', 'success');
+    } catch (err) {
+      if (placeholder?.parentNode) placeholder.replaceWith(card);
+      currentMessagesMap.set(id, msg);
+      allLoadedMessages.push(msg);
+      showToast(`Could not delete the message: ${err.message}`, 'error');
+    }
+    loadMailboxSummary();
   });
 
   btnReaderBackMobile?.addEventListener('click', () => {
@@ -978,20 +1154,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (modalAccountsVault && !modalAccountsVault.classList.contains('hidden')) modalAccountsVault.classList.add('hidden');
       if (modalNotifications && !modalNotifications.classList.contains('hidden')) modalNotifications.classList.add('hidden');
       if (modalSettings && !modalSettings.classList.contains('hidden')) modalSettings.classList.add('hidden');
+      const composeModal = document.getElementById('modal-compose');
+      if (composeModal && !composeModal.classList.contains('hidden')) composeModal.classList.add('hidden');
       if (modalEmailReader && !modalEmailReader.classList.contains('hidden')) closeEmailReader();
       if (desktopReaderPane?.classList.contains('mobile-open')) desktopReaderPane.classList.remove('mobile-open');
     }
   });
 
   // State Updates on Message Cards
-  async function markMessageRead(id, containerEl) {
-    try {
-      await fetch(`/api/messages/${encodeURIComponent(id)}/read`, { method: 'POST' });
-      const msg = currentMessagesMap.get(String(id));
-      if (msg) msg.isSeen = true;
-      updateCardSeenState(id, true);
-      loadMailboxSummary();
-    } catch {}
+  async function markMessageRead(id) {
+    return setSeen(id, true);
   }
 
   function updateCardSeenState(msgId, isSeen) {
@@ -1017,23 +1189,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function toggleMessageStar(id, btnEl) {
+  async function toggleMessageStar(id) {
     const msg = currentMessagesMap.get(String(id));
     if (!msg) return;
-    const isCurrentlyStarred = Boolean(msg.isFlagged);
-    const endpoint = isCurrentlyStarred ? 'unstar' : 'star';
-
-    try {
-      const res = await fetch(`/api/messages/${encodeURIComponent(id)}/${endpoint}`, { method: 'POST' });
-      if (res.ok) {
-        msg.isFlagged = !isCurrentlyStarred;
-        updateCardStarState(id, msg.isFlagged);
-        if (activeReaderMessage && String(activeReaderMessage.id) === String(id)) {
-          activeReaderMessage.isFlagged = msg.isFlagged;
-          updateReaderStarButton(msg.isFlagged);
-        }
-      }
-    } catch {}
+    await setStarred(id, !msg.isFlagged);
   }
 
   function updateCardStarState(msgId, isStarred) {
@@ -1057,10 +1216,9 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('No unread messages visible.', 'info');
       return;
     }
-    for (const m of unread) {
-      markMessageRead(m.id);
-    }
-    showToast(`Marked ${unread.length} messages as read.`, 'success');
+    const results = await Promise.all(unread.map(m => markMessageRead(m.id)));
+    const okCount = results.filter(Boolean).length;
+    if (okCount > 0) showToast(`Marked ${okCount} messages as read.`, 'success');
   });
 
   // ==========================================
@@ -1239,14 +1397,19 @@ document.addEventListener('DOMContentLoaded', () => {
   // 8. GUIDED ONBOARDING & VAULT CONNECTIONS
   // ==========================================
   // Auto-hyphenate Apple password: xxxx-xxxx-xxxx-xxxx
-  inputApplePass?.addEventListener('input', (e) => {
-    let val = e.target.value.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-    if (val.length > 16) val = val.slice(0, 16);
+  function formatAppPasswordInput(value) {
+    const val = String(value || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase().slice(0, 16);
     const parts = [];
     for (let i = 0; i < val.length; i += 4) {
       parts.push(val.slice(i, i + 4));
     }
-    e.target.value = parts.join('-');
+    return parts.join('-');
+  }
+  window.formatAppPasswordInput = formatAppPasswordInput;
+  globalThis.formatAppPasswordInput = formatAppPasswordInput;
+
+  inputApplePass?.addEventListener('input', (e) => {
+    e.target.value = formatAppPasswordInput(e.target.value);
   });
 
   // Password visibility toggles
@@ -1420,6 +1583,198 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Web Push: subscribe this browser to VIP alerts
+  function urlBase64ToUint8Array(base64) {
+    const padded = `${base64}${'='.repeat((4 - (base64.length % 4)) % 4)}`.replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(padded);
+    return Uint8Array.from(raw, c => c.charCodeAt(0));
+  }
+
+  const pushSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+    && typeof window !== 'undefined' && 'PushManager' in window && 'Notification' in window;
+
+  async function getPushSubscription() {
+    if (!pushSupported) return null;
+    const reg = await navigator.serviceWorker.ready;
+    return reg.pushManager.getSubscription();
+  }
+
+  function setPushUi(subscribed, message) {
+    if (webPushBtnText) webPushBtnText.textContent = subscribed ? 'Disable Web Push Notifications' : 'Enable Web Push Notifications';
+    if (webPushStatus) webPushStatus.textContent = message || (subscribed ? 'Status: This browser gets VIP alerts' : 'Status: Push not yet subscribed');
+  }
+
+  async function refreshPushUi() {
+    if (!pushSupported) {
+      setPushUi(false, 'Status: This browser does not support push. On iPhone, add Mailboxer to the Home Screen first.');
+      if (btnToggleWebPush) btnToggleWebPush.disabled = true;
+      return;
+    }
+    try {
+      setPushUi(Boolean(await getPushSubscription()));
+    } catch {
+      setPushUi(false);
+    }
+  }
+
+  btnToggleWebPush?.addEventListener('click', async () => {
+    if (!pushSupported) return;
+    btnToggleWebPush.disabled = true;
+    try {
+      const existing = await getPushSubscription();
+      if (existing) {
+        await fetch('/api/notifications/unsubscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: existing.endpoint })
+        }).catch(() => {});
+        await existing.unsubscribe();
+        setPushUi(false);
+        showToast('Web push turned off for this browser.', 'info');
+        return;
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setPushUi(false, 'Status: Notifications are blocked for this site in your browser settings.');
+        return;
+      }
+      const keyRes = await fetch('/api/notifications/vapid-public-key');
+      const { publicKey } = await keyRes.json();
+      if (!keyRes.ok || !publicKey) throw new Error('Server has no push key');
+
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey)
+      });
+      const res = await fetch('/api/notifications/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...sub.toJSON(), userAgent: navigator.userAgent })
+      });
+      if (!res.ok) {
+        await sub.unsubscribe().catch(() => {});
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setPushUi(true);
+      showToast('Web push is on. VIP mail will alert this device.', 'success');
+    } catch (err) {
+      setPushUi(false, `Status: Could not enable push (${err.message})`);
+    } finally {
+      btnToggleWebPush.disabled = false;
+    }
+  });
+
+  btnOpenConduits?.addEventListener('click', refreshPushUi);
+
+  // ==========================================
+  // 9b. COMPOSE & REPLY
+  // ==========================================
+  const modalCompose = document.getElementById('modal-compose');
+  const formCompose = document.getElementById('form-compose');
+  const composeTitle = document.getElementById('compose-title');
+  const composeFrom = document.getElementById('compose-from');
+  const composeTo = document.getElementById('compose-to');
+  const composeCc = document.getElementById('compose-cc');
+  const composeSubject = document.getElementById('compose-subject');
+  const composeBody = document.getElementById('compose-body');
+  const composeError = document.getElementById('compose-error');
+  const btnSendCompose = document.getElementById('btn-send-compose');
+  const btnCompose = document.getElementById('btn-compose');
+  const btnCloseCompose = document.getElementById('btn-close-compose');
+  let composeReplyToId = null;
+
+  function openCompose(options = {}) {
+    if (!modalCompose) return;
+    if (accountsList.length === 0) {
+      showToast('Connect an inbox first.', 'warning');
+      return;
+    }
+    composeReplyToId = options.replyToMessageId || null;
+    if (composeTitle) composeTitle.textContent = options.title || 'New Message';
+    if (composeFrom) {
+      composeFrom.innerHTML = accountsList.map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.email || a.id)}</option>`).join('');
+      const preferred = options.accountId || (currentAccount !== 'ALL' ? currentAccount : accountsList[0].id);
+      if (accountsList.some(a => a.id === preferred)) composeFrom.value = preferred;
+    }
+    if (composeTo) composeTo.value = options.to || '';
+    if (composeCc) composeCc.value = options.cc || '';
+    if (composeSubject) composeSubject.value = options.subject || '';
+    if (composeBody) {
+      composeBody.value = options.body || '';
+      composeBody.setSelectionRange?.(0, 0);
+    }
+    hideError(composeError);
+    modalCompose.classList.remove('hidden');
+    (options.to ? composeBody : composeTo)?.focus();
+  }
+
+  function closeCompose() {
+    modalCompose?.classList.add('hidden');
+    composeReplyToId = null;
+  }
+
+  function replyToActiveMessage() {
+    const msg = activeReaderMessage;
+    if (!msg) return;
+    const subject = msg.subject || '';
+    const quotedSource = activeReaderBody?.text || cleanMimeBody(msg.bodySnippet || '');
+    const quoted = quotedSource.split('\n').map(line => `> ${line}`).join('\n');
+    const when = msg.date ? new Date(msg.date).toLocaleString() : '';
+    const who = msg.sender || msg.senderEmail || 'the sender';
+    openCompose({
+      title: 'Reply',
+      accountId: msg.accountId,
+      to: msg.senderEmail || '',
+      subject: /^re:/i.test(subject) ? subject : `Re: ${subject}`,
+      body: `\n\nOn ${when}, ${who} wrote:\n${quoted}`,
+      replyToMessageId: msg.id
+    });
+  }
+
+  btnCompose?.addEventListener('click', () => openCompose());
+  btnReaderReply?.addEventListener('click', (e) => {
+    e.preventDefault();
+    replyToActiveMessage();
+  });
+  btnCloseCompose?.addEventListener('click', closeCompose);
+
+  formCompose?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideError(composeError);
+    const payload = {
+      accountId: composeFrom?.value,
+      to: composeTo?.value.trim(),
+      cc: composeCc?.value.trim(),
+      subject: composeSubject?.value.trim(),
+      text: composeBody?.value || '',
+      replyToMessageId: composeReplyToId || undefined
+    };
+    if (!payload.to) {
+      showError(composeError, 'Add at least one recipient.');
+      return;
+    }
+    setLoading(btnSendCompose, true, 'Sending…');
+    try {
+      const res = await fetch('/api/messages/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (payload.replyToMessageId) applySeenState(payload.replyToMessageId, true);
+      closeCompose();
+      showToast(data.savedToSent === false ? 'Sent (no copy saved to Sent folder).' : 'Message sent.', 'success');
+    } catch (err) {
+      showError(composeError, `Not sent: ${err.message}`);
+    } finally {
+      setLoading(btnSendCompose, false, 'Send');
+    }
+  });
+
   // ==========================================
   // 10. UI UTILITIES & TOASTS
   // ==========================================
@@ -1482,33 +1837,33 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const tab = item.getAttribute('data-tab');
       if (tab === 'accounts') {
-        openAccountsModal();
+        if (modalAccountsVault) modalAccountsVault.classList.remove('hidden');
         return;
       }
 
       mobileBottomNav.querySelectorAll('.mobile-nav-item').forEach(b => b.classList.remove('active'));
       item.classList.add('active');
 
-      sidebarAccountsList?.querySelectorAll('.account-nav-item').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.nav-item, .account-nav-row').forEach(el => el.classList.remove('active'));
+      currentAccount = 'ALL';
+      filterUnreadOnly = false;
+      filterStarredOnly = false;
+      updateFilterButtonStates();
 
       if (tab === 'inbox') {
         currentCategory = 'ALL';
-        selectedAccountId = null;
         navAllInboxes?.classList.add('active');
-        updateActiveViewHeader('All Inboxes', 'All active accounts');
       } else if (tab === 'vip') {
         currentCategory = 'VIP';
         document.getElementById('nav-vip-inbox')?.classList.add('active');
-        updateActiveViewHeader('VIP / Urgent', 'Priority & actionable messages');
       } else if (tab === 'courses') {
         currentCategory = 'UPDATE';
         document.getElementById('nav-update-inbox')?.classList.add('active');
-        updateActiveViewHeader('Coursework & LMS', 'Assignments, announcements & grades');
       } else if (tab === 'noise') {
         currentCategory = 'NOISE';
         document.getElementById('nav-noise-inbox')?.classList.add('active');
-        updateActiveViewHeader('Promotions & Noise', 'Marketing, receipts & digests');
       }
+      if (mobileBarTitle) mobileBarTitle.textContent = item.querySelector('span')?.textContent || 'Mailboxer';
 
       if (desktopReaderPane) desktopReaderPane.classList.remove('mobile-open');
 
@@ -1545,7 +1900,39 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
     });
+    // A notification click while the app is already open
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data?.type === 'MAILBOXER_OPEN_URL' && typeof event.data.url === 'string') {
+        const hash = event.data.url.split('#')[1];
+        if (hash) openFromHash(`#${hash}`);
+      }
+    });
   }
+
+  // Deep link from notifications: /#msg-<id> opens that message
+  async function openFromHash(hash = window.location.hash) {
+    const match = /^#msg-(.+)$/.exec(hash || '');
+    if (!match) return;
+    const id = decodeURIComponent(match[1]);
+    try {
+      let msg = currentMessagesMap.get(id);
+      if (!msg) {
+        const res = await fetch(`/api/messages/${encodeURIComponent(id)}`);
+        if (!res.ok) throw new Error(res.status === 404 ? 'it may have been deleted' : `HTTP ${res.status}`);
+        msg = (await res.json()).message;
+        if (msg?.id) currentMessagesMap.set(String(msg.id), msg);
+      }
+      if (msg) openEmailReader(msg);
+    } catch (err) {
+      showToast(`Could not open that message: ${err.message}`, 'warning');
+    } finally {
+      if (window.location.hash === hash) history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  }
+
+  window.addEventListener('hashchange', () => openFromHash());
+  if (window.location.hash) openFromHash();
+  refreshPushUi();
 
     // Export globally for browser and test environments
   if (typeof window !== 'undefined') {
